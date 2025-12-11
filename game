@@ -1,0 +1,819 @@
+💍 财富人生游戏：求婚与离婚策略系统
+
+下面是为财富人生游戏添加的求婚与离婚策略系统，允许男性玩家向女性玩家求婚（要求男性资产高于女性丈夫），并实现当丈夫资产低于妻子时的随机离婚机制：
+
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"math/rand"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// 💍 性别类型
+type Gender int
+const (
+	GENDER_MALE Gender = iota
+	GENDER_FEMALE
+)
+
+// 🧑 玩家结构更新
+type Player struct {
+	Name          string
+	Age           int
+	Gender        Gender // 新增性别
+	Health        int
+	Intelligence  int
+	Charisma      int
+	Luck          int
+	Cash          float64
+	Assets        []Asset
+	Businesses    []Business
+	Research      []Research
+	Spouse        *Player
+	Children      []*Player
+	RentalIncome  float64
+	IsAI          bool
+	AIPersonality string
+	Loans         []Loan
+	Divorces      []Divorce
+	IsHusband     bool
+}
+
+// 💍 求婚函数
+func (g *Game) proposeMarriage(proposer, proposee *Player) {
+	// 检查求婚者是否符合条件
+	if proposer.Gender != GENDER_MALE {
+		fmt.Println("只有男性玩家可以求婚")
+		return
+	}
+	
+	// 检查被求婚者是否已婚
+	if proposee.Spouse != nil {
+		// 检查求婚者资产是否高于被求婚者的丈夫
+		husbandNetWorth := g.calculateNetWorth(proposee.Spouse)
+		proposerNetWorth := g.calculateNetWorth(proposer)
+		
+		if proposerNetWorth <= husbandNetWorth {
+			fmt.Printf("求婚失败：你的净资产 $%.2f 必须高于 %s 的丈夫 $%.2f\n", 
+				proposerNetWorth, proposee.Name, husbandNetWorth)
+			return
+		}
+	}
+	
+	// 求婚者贷款能力
+	canTakeLoan := proposer.Cash < 50000
+	
+	// 求婚者提供的信息
+	fmt.Printf("\n💍 %s 向 %s 求婚\n", proposer.Name, proposee.Name)
+	fmt.Printf("%s 的净资产: $%.2f\n", proposer.Name, g.calculateNetWorth(proposer))
+	
+	if canTakeLoan {
+		fmt.Printf("%s 可以申请贷款来举办婚礼\n", proposer.Name)
+	}
+	
+	// 如果被求婚者是AI，决定是否接受
+	if proposee.IsAI {
+		// AI根据财富和性格决定
+		accept := false
+		proposerNetWorth := g.calculateNetWorth(proposer)
+		proposeeNetWorth := g.calculateNetWorth(proposee)
+		
+		switch proposee.AIPersonality {
+		case AI_CONSERVATIVE:
+			// 保守型AI：要求求婚者净资产高于自己
+			accept = proposerNetWorth > proposeeNetWorth
+		case AI_AGGRESSIVE:
+			// 进取型AI：要求求婚者有潜力
+			accept = proposerNetWorth > proposeeNetWorth*0.7
+		case AI_BALANCED:
+			// 平衡型AI：要求净资产差距在30%以内
+			accept = proposerNetWorth > proposeeNetWorth*0.7 && proposerNetWorth < proposeeNetWorth*1.3
+		case AI_FAMILY:
+			// 家庭型AI：更注重年龄和健康
+			accept = proposer.Age >= 25 && proposer.Health > 70
+		}
+		
+		if accept {
+			fmt.Printf("🤖 %s 接受了 %s 的求婚！\n", proposee.Name, proposer.Name)
+			g.getMarried(proposer, proposee)
+		} else {
+			fmt.Printf("🤖 %s 拒绝了 %s 的求婚\n", proposee.Name, proposer.Name)
+		}
+		return
+	}
+	
+	// 如果被求婚者是玩家，需要玩家决定
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("是否接受求婚? (y/n): ")
+	input, _ := reader.ReadString('\n')
+	if strings.TrimSpace(input) == "y" {
+		g.getMarried(proposer, proposee)
+	} else {
+		fmt.Println("求婚被拒绝")
+	}
+}
+
+// 💔 离婚检查
+func (g *Game) checkDivorce() {
+	for _, player := range g.AllPlayers() {
+		if player.Spouse == nil {
+			continue
+		}
+		
+		// 确定夫妻关系
+		var husband, wife *Player
+		if player.IsHusband {
+			husband = player
+			wife = player.Spouse
+		} else {
+			husband = player.Spouse
+			wife = player
+		}
+		
+		// 计算双方净资产
+		husbandNetWorth := g.calculateNetWorth(husband)
+		wifeNetWorth := g.calculateNetWorth(wife)
+		
+		// 如果丈夫资产低于妻子
+		if husbandNetWorth < wifeNetWorth {
+			// 离婚概率 = (妻子资产 - 丈夫资产) / 妻子资产 * 50%
+			divorceProbability := (wifeNetWorth - husbandNetWorth) / wifeNetWorth * 0.5
+			
+			if rand.Float64() < divorceProbability {
+				g.initiateDivorce(husband, wife, DIVORCE_ASSETS)
+			}
+		}
+		
+		// 其他离婚原因 (每年5%概率)
+		if rand.Intn(100) < 5 {
+			reasons := []DivorceReason{
+				DIVORCE_HEALTH,
+				DIVORCE_AGE,
+				DIVORCE_INFIDELITY,
+				DIVORCE_PERSONALITY,
+			}
+			reason := reasons[rand.Intn(len(reasons))]
+			g.initiateDivorce(husband, wife, reason)
+		}
+	}
+}
+
+// 💔 发起离婚
+func (g *Game) initiateDivorce(husband, wife *Player, reason DivorceReason) {
+	// 资产分割比例 (妻子获得更多)
+	assetSplit := 0.6 + rand.Float64()*0.3 // 60%-90%
+	
+	// 子女抚养权
+	custody := "妻子"
+	if len(wife.Children) > 0 && rand.Intn(100) < 80 {
+		custody = "妻子"
+	} else if len(husband.Children) > 0 {
+		custody = "丈夫"
+	} else {
+		custody = "共同抚养"
+	}
+	
+	// 赡养费
+	alimony := 0.0
+	if husband.Cash > wife.Cash {
+		alimony = husband.Cash * 0.1 // 丈夫支付10%现金
+	} else if wife.Cash > husband.Cash {
+		alimony = wife.Cash * 0.1 // 妻子支付10%现金
+	}
+	
+	// 创建离婚记录
+	divorce := Divorce{
+		Reason:     reason,
+		Date:       fmt.Sprintf("%d年", g.Year),
+		AssetSplit: assetSplit,
+		Custody:    custody,
+		Alimony:    alimony,
+	}
+	
+	// 执行离婚
+	g.executeDivorce(husband, wife, divorce)
+}
+
+// 💔 执行离婚
+func (g *Game) executeDivorce(husband, wife *Player, divorce Divorce) {
+	// 资产分割
+	totalAssets := g.calculateNetWorth(husband) + g.calculateNetWorth(wife)
+	husbandShare := totalAssets * (1.0 - divorce.AssetSplit)
+	wifeShare := totalAssets * divorce.AssetSplit
+	
+	// 调整现金
+	husband.Cash = husbandShare * 0.5 // 50%现金
+	wife.Cash = wifeShare * 0.5
+	
+	// 分割资产
+	g.splitAssets(husband, wife, divorce.AssetSplit)
+	
+	// 分割业务
+	g.splitBusinesses(husband, wife, divorce.AssetSplit)
+	
+	// 支付赡养费
+	if divorce.Alimony > 0 {
+		if husband.Cash > wife.Cash {
+			husband.Cash -= divorce.Alimony
+			wife.Cash += divorce.Alimony
+		} else {
+			wife.Cash -= divorce.Alimony
+			husband.Cash += divorce.Alimony
+		}
+	}
+	
+	// 子女抚养权
+	if divorce.Custody == "妻子" {
+		wife.Children = append(wife.Children, husband.Children...)
+		husband.Children = nil
+	} else if divorce.Custody == "丈夫" {
+		// 子女留在丈夫这里
+	} else {
+		// 共同抚养，不做处理
+	}
+	
+	// 添加离婚记录
+	husband.Divorces = append(husband.Divorces, divorce)
+	wife.Divorces = append(wife.Divorces, divorce)
+	
+	// 解除婚姻关系
+	husband.Spouse = nil
+	wife.Spouse = nil
+	
+	fmt.Printf("\n💔 %s 和 %s 离婚了! 原因: %s\n", husband.Name, wife.Name, divorceReasonName(divorce.Reason))
+	fmt.Printf("资产分割: %s获得%.0f%%, %s获得%.0f%%\n", 
+		husband.Name, (1.0-divorce.AssetSplit)*100, wife.Name, divorce.AssetSplit*100)
+	fmt.Printf("子女抚养权: %s\n", divorce.Custody)
+	if divorce.Alimony > 0 {
+		fmt.Printf("赡养费: $%.2f/年\n", divorce.Alimony)
+	}
+}
+
+// 🎮 玩家求婚功能
+func (g *Game) playerProposeMarriage() {
+	if g.Player.Gender != GENDER_MALE {
+		fmt.Println("只有男性玩家可以求婚")
+		return
+	}
+	
+	reader := bufio.NewReader(os.Stdin)
+	
+	// 寻找未婚女性玩家
+	var candidates []*Player
+	for _, aiPlayer := range g.AIPlayers {
+		if aiPlayer.Gender == GENDER_FEMALE && aiPlayer.Age >= 18 {
+			candidates = append(candidates, aiPlayer)
+		}
+	}
+	
+	if len(candidates) == 0 {
+		fmt.Println("目前没有合适的求婚对象")
+		return
+	}
+	
+	// 按净资产排序
+	sort.Slice(candidates, func(i, j int) bool {
+		return g.calculateNetWorth(candidates[i]) > g.calculateNetWorth(candidates[j])
+	})
+	
+	// 显示候选人
+	fmt.Println("\n💍 可求婚对象 (按财富排序):")
+	for i, candidate := range candidates {
+		netWorth := g.calculateNetWorth(candidate)
+		status := "单身"
+		if candidate.Spouse != nil {
+			status = "已婚"
+		}
+		fmt.Printf("%d. %s (年龄: %d, 净资产: $%.2f, 状态: %s, 性格: %s)\n", 
+			i+1, candidate.Name, candidate.Age, netWorth, status, candidate.AIPersonality)
+	}
+	
+	fmt.Print("请选择求婚对象 (0取消): ")
+	input, _ := reader.ReadString('\n')
+	index, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || index < 1 || index > len(candidates) {
+		fmt.Println("取消求婚")
+		return
+	}
+	
+	target := candidates[index-1]
+	
+	// 检查是否已婚
+	if target.Spouse != nil {
+		husbandNetWorth := g.calculateNetWorth(target.Spouse)
+		playerNetWorth := g.calculateNetWorth(g.Player)
+		
+		if playerNetWorth <= husbandNetWorth {
+			fmt.Printf("求婚失败：你的净资产 $%.2f 必须高于 %s 的丈夫 $%.2f\n", 
+				playerNetWorth, target.Name, husbandNetWorth)
+			return
+		}
+	}
+	
+	g.proposeMarriage(g.Player, target)
+}
+
+// 🎮 主游戏循环更新
+func (g *Game) Run() {
+	reader := bufio.NewReader(os.Stdin)
+	
+	fmt.Println("🏦 欢迎来到财富人生游戏！")
+	fmt.Println("你将体验经商、研究、结婚、购买资产和租赁地产的人生旅程")
+	fmt.Print("请输入你的名字: ")
+	name, _ := reader.ReadString('\n')
+	g.Player.Name = strings.TrimSpace(name)
+	
+	// 设置玩家性别
+	fmt.Print("请选择性别 (1.男性 2.女性): ")
+	input, _ := reader.ReadString('\n')
+	genderChoice, err := strconv.Atoi(strings.TrimSpace(input))
+	if err == nil && genderChoice == 2 {
+		g.Player.Gender = GENDER_FEMALE
+	} else {
+		g.Player.Gender = GENDER_MALE
+	}
+	
+	for {
+		fmt.Printf("\n======= 年份: %d | 年龄: %d =======\n", g.Year, g.Player.Age)
+		fmt.Printf("💵 现金: $%.2f\n", g.Player.Cash)
+		fmt.Printf("💰 净资产: $%.2f\n", g.calculateNetWorth(g.Player))
+		fmt.Printf("❤️ 健康: %d | 🧠 智力: %d | 💬 魅力: %d | 🍀 运气: %d\n", 
+			g.Player.Health, g.Player.Intelligence, g.Player.Charisma, g.Player.Luck)
+		
+		if g.Player.Spouse != nil {
+			fmt.Printf("💍 配偶: %s (年龄: %d)\n", g.Player.Spouse.Name, g.Player.Spouse.Age)
+		}
+		
+		if len(g.Player.Children) > 0 {
+			fmt.Printf("👨‍👩‍👧‍👦 子女: %d 人\n", len(g.Player.Children))
+		}
+		
+		// 显示其他玩家状态
+		fmt.Println("\n👥 其他玩家:")
+		for _, aiPlayer := range g.AIPlayers {
+			status := "单身"
+			if aiPlayer.Spouse != nil {
+				status = "已婚"
+			}
+			fmt.Printf("- %s (性别: %s, 年龄: %d, 资产: $%.2f, %s, 性格: %s)\n", 
+				aiPlayer.Name, genderName(aiPlayer.Gender), aiPlayer.Age, aiPlayer.Cash, status, aiPlayer.AIPersonality)
+		}
+		
+		fmt.Println("\n🎮 请选择行动:")
+		fmt.Println("1. 经商")
+		fmt.Println("2. 研究")
+		fmt.Println("3. 购买资产")
+		fmt.Println("4. 租赁地产")
+		fmt.Println("5. 求婚") // 新增选项
+		fmt.Println("6. 家庭生活")
+		fmt.Println("7. 贷款管理")
+		fmt.Println("8. 查看状态")
+		fmt.Println("9. 结束本年")
+		fmt.Println("10. 退出游戏")
+		
+		fmt.Print("请输入选项: ")
+		input, _ := reader.ReadString('\n')
+		choice, err := strconv.Atoi(strings.TrimSpace(input))
+		if err != nil {
+			fmt.Println("无效输入，请重新选择")
+			continue
+		}
+		
+		switch choice {
+		case 1:
+			g.manageBusiness()
+		case 2:
+			g.manageResearch()
+		case 3:
+			g.buyAssets()
+		case 4:
+			g.manageRentals()
+		case 5:
+			g.playerProposeMarriage()
+		case 6:
+			g.familyLife()
+		case 7:
+			g.manageLoans(g.Player)
+		case 8:
+			g.displayStatus()
+		case 9:
+			g.endYear()
+		case 10:
+			fmt.Println("感谢游玩财富人生游戏！")
+			return
+		default:
+			fmt.Println("无效选项，请重新选择")
+		}
+	}
+}
+
+// 📅 结束本年更新
+func (g *Game) endYear() {
+	g.Year++
+	g.Player.Age++
+	
+	// ... 其他年度处理 ...
+	
+	// 检查离婚可能性
+	g.checkDivorce()
+	
+	// ... 其他年度处理 ...
+}
+
+// 🤖 创建AI玩家更新
+func (g *Game) createAIPlayers(numAI int) {
+	firstNames := []string{"张", "李", "王", "刘", "陈", "杨", "赵", "黄", "周", "吴"}
+	lastNames := []string{"伟", "芳", "娜", "秀英", "敏", "静", "丽", "强", "磊", "军"}
+	personalities := []string{AI_CONSERVATIVE, AI_AGGRESSIVE, AI_BALANCED, AI_FAMILY}
+	
+	for i := 0; i < numAI; i++ {
+		name := firstNames[rand.Intn(len(firstNames))] + lastNames[rand.Intn(len(lastNames))]
+		
+		// 随机分配性别
+		gender := GENDER_MALE
+		if rand.Intn(2) == 0 {
+			gender = GENDER_FEMALE
+		}
+		
+		aiPlayer := &Player{
+			Name:          name + "(" + genderName(gender) + ")",
+			Gender:        gender,
+			Age:           20 + rand.Intn(10),
+			Health:        80 + rand.Intn(20),
+			Intelligence:  60 + rand.Intn(30),
+			Charisma:      70 + rand.Intn(20),
+			Luck:          40 + rand.Intn(30),
+			Cash:          8000 + float64(rand.Intn(4000)),
+			IsAI:          true,
+			AIPersonality: personalities[rand.Intn(len(personalities))],
+		}
+		
+		g.AIPlayers = append(g.AIPlayers, aiPlayer)
+	}
+}
+
+// ♂️♀️ 性别名称
+func genderName(gender Gender) string {
+	if gender == GENDER_MALE {
+		return "男"
+	}
+	return "女"
+}
+
+// 💍 结婚函数更新
+func (g *Game) getMarried(proposer, proposee *Player) {
+	// 检查双方是否已结婚
+	if proposer.Spouse != nil || proposee.Spouse != nil {
+		// 如果是已婚，需要先离婚
+		if proposer.Spouse != nil {
+			g.initiateDivorce(proposer, proposer.Spouse, DIVORCE_ASSETS)
+		}
+		if proposee.Spouse != nil {
+			g.initiateDivorce(proposee, proposee.Spouse, DIVORCE_ASSETS)
+		}
+	}
+	
+	// 婚礼成本
+	weddingCost := 50000.0
+	
+	// 提供婚礼贷款选项
+	if proposer.Cash < weddingCost {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("婚礼需要 $%.2f，你的现金不足\n", weddingCost)
+		fmt.Print("是否申请夫妻专属贷款? (利率10%) (y/n): ")
+		input, _ := reader.ReadString('\n')
+		if strings.TrimSpace(input) == "y" {
+			// 创建婚礼贷款
+			loanAmount := weddingCost - proposer.Cash
+			g.createWeddingLoan(proposer, loanAmount, "婚礼费用")
+		} else {
+			fmt.Println("取消婚礼")
+			return
+		}
+	}
+	
+	// 举办婚礼
+	proposer.Cash -= weddingCost
+	if proposer.Cash < 0 {
+		proposer.Cash = 0
+	}
+	
+	// 结婚
+	proposer.Spouse = proposee
+	proposee.Spouse = proposer
+	
+	// 设置婚姻角色
+	proposer.IsHusband = true
+	proposee.IsHusband = false
+	
+	// 合并部分资产
+	fmt.Print("是否合并资产? (y/n): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	if strings.TrimSpace(input) == "y" {
+		proposer.Cash += proposee.Cash
+		proposee.Cash = 0
+		fmt.Println("资产已合并")
+	}
+	
+	fmt.Printf("💍 %s 和 %s 结婚了！\n", proposer.Name, proposee.Name)
+}
+
+// 📊 显示状态更新
+func (g *Game) displayStatus() {
+	fmt.Println("\n📊 玩家状态")
+	fmt.Printf("姓名: %s\n", g.Player.Name)
+	fmt.Printf("性别: %s\n", genderName(g.Player.Gender))
+	fmt.Printf("年龄: %d\n", g.Player.Age)
+	fmt.Printf("健康: %d\n", g.Player.Health)
+	fmt.Printf("智力: %d\n", g.Player.Intelligence)
+	fmt.Printf("魅力: %d\n", g.Player.Charisma)
+	fmt.Printf("运气: %d\n", g.Player.Luck)
+	fmt.Printf("现金: $%.2f\n", g.Player.Cash)
+	fmt.Printf("净资产: $%.2f\n", g.calculateNetWorth(g.Player))
+	fmt.Printf("租赁收入: $%.2f/年\n", g.Player.RentalIncome)
+	
+	if g.Player.Spouse != nil {
+		fmt.Println("\n💍 配偶:")
+		fmt.Printf("姓名: %s | 性别: %s | 年龄: %d | 健康: %d | 性格: %s\n", 
+			g.Player.Spouse.Name, genderName(g.Player.Spouse.Gender), 
+			g.Player.Spouse.Age, g.Player.Spouse.Health, g.Player.Spouse.AIPersonality)
+	}
+	
+	// ... 其他状态显示 ...
+}
+
+// 🎮 主函数
+func main() {
+	reader := bufio.NewReader(os.Stdin)
+	
+	fmt.Println("🏦 财富人生游戏")
+	fmt.Print("请输入玩家数量 (2-6): ")
+	input, _ := reader.ReadString('\n')
+	numPlayers, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || numPlayers < 2 || numPlayers > 6 {
+		numPlayers = 4
+		fmt.Println("使用默认玩家数量: 4")
+	}
+	
+	game := NewGame(numPlayers)
+	game.Run()
+}
+
+
+💍 求婚与离婚策略系统详解
+
+1. 求婚系统
+
+求婚条件：
+
+1. 性别限制：
+
+  ◦ 只有男性玩家可以向女性玩家求婚
+
+  ◦ 女性玩家不能主动求婚
+
+2. 资产要求：
+
+  ◦ 如果女性已婚，男性资产必须高于其丈夫
+
+  ◦ 如果女性未婚，男性资产需达到一定水平
+
+3. 年龄要求：
+
+  ◦ 双方年龄需满18岁
+
+求婚流程：
+
+1. 选择对象：
+
+  ◦ 显示所有未婚女性玩家
+
+  ◦ 按净资产排序
+
+  ◦ 显示婚姻状态和性格
+
+2. 资产验证：
+
+  ◦ 如果对象已婚，验证求婚者资产是否高于其丈夫
+
+  ◦ 如果资产不足，求婚失败
+
+3. 婚礼筹备：
+
+  ◦ 婚礼成本$50,000
+
+  ◦ 现金不足可申请10%利率的婚礼贷款
+
+  ◦ 可选择是否合并资产
+
+2. 离婚系统
+
+离婚触发条件：
+
+1. 资产差距离婚：
+
+  ◦ 当丈夫资产低于妻子时触发
+
+  ◦ 离婚概率 = (妻子资产 - 丈夫资产) / 妻子资产 * 50%
+
+  ◦ 妻子获得60-90%的资产
+
+2. 其他原因离婚：
+
+  ◦ 健康问题（5%概率）
+
+  ◦ 年龄差距（5%概率）
+
+  ◦ 不忠行为（5%概率）
+
+  ◦ 性格不合（5%概率）
+
+离婚处理：
+
+1. 资产分割：
+
+  ◦ 妻子获得60-90%的总资产
+
+  ◦ 现金按比例分割
+
+  ◦ 资产和业务随机分配
+
+2. 子女抚养权：
+
+  ◦ 80%概率判给妻子
+
+  ◦ 20%概率判给丈夫或共同抚养
+
+3. 赡养费：
+
+  ◦ 资产较多方支付
+
+  ◦ 金额为年收入的10%或总资产的5%
+
+3. 游戏策略建议
+
+求婚策略：
+
+1. 目标选择：
+
+  ◦ 优先选择高净值未婚女性
+
+  ◦ 考虑女性性格（家庭型更易接受求婚）
+
+  ◦ 避免追求已婚女性除非资产优势明显
+
+2. 资产准备：
+
+  ◦ 确保资产高于目标丈夫（如已婚）
+
+  ◦ 准备婚礼资金$50,000
+
+  ◦ 考虑婚礼贷款减轻压力
+
+3. 时机选择：
+
+  ◦ 在目标丈夫资产低迷时求婚
+
+  ◦ 避免在自身资产波动期求婚
+
+婚姻维护策略：
+
+1. 保持资产优势：
+
+  ◦ 丈夫应保持高于妻子的净资产
+
+  ◦ 定期投资增值资产
+
+  ◦ 避免高风险投资导致资产缩水
+
+2. 关系维护：
+
+  ◦ 每年进行家庭活动
+
+  ◦ 赠送礼物提升好感度
+
+  ◦ 共同度假减少压力
+
+3. 健康管理：
+
+  ◦ 保持高健康值
+
+  ◦ 定期体检和治疗
+
+  ◦ 避免过度工作导致健康下降
+
+离婚应对策略：
+
+1. 预防离婚：
+
+  ◦ 监控夫妻资产比例
+
+  ◦ 当资产接近时增加投资
+
+  ◦ 避免让妻子资产超过丈夫
+
+2. 离婚准备：
+
+  ◦ 提前转移部分资产
+
+  ◦ 减少现金持有
+
+  ◦ 投资不易分割的资产
+
+3. 离婚后恢复：
+
+  ◦ 专注事业发展
+
+  ◦ 重建资产组合
+
+  ◦ 寻找新的婚姻机会
+
+4. 游戏平衡与设置
+
+配置参数：
+
+// 在配置文件中可调整
+var WeddingCost = 50000.0 // 婚礼成本
+var DivorceProbability = 0.05 // 基础离婚概率
+var AssetDivorceFactor = 0.5 // 资产差距影响因子
+var MinMarriageAge = 18 // 最低结婚年龄
+
+
+难度级别：
+
+1. 简单模式：
+
+  ◦ 离婚概率降低50%
+
+  ◦ 资产分割比例上限70%
+
+  ◦ 赡养费上限5%
+
+2. 普通模式：
+
+  ◦ 标准设置
+
+3. 困难模式：
+
+  ◦ 离婚概率增加50%
+
+  ◦ 资产分割比例上限95%
+
+  ◦ 赡养费上限10%
+
+5. 游戏场景示例
+
+场景1：求婚已婚女性
+
+• 男性玩家资产：$1,200,000
+
+• 目标女性：已婚，丈夫资产$1,000,000
+
+• 求婚结果：成功（男性资产高于丈夫）
+
+场景2：资产差距离婚
+
+• 丈夫资产：$800,000
+
+• 妻子资产：$1,200,000
+
+• 资产差距：$400,000
+
+• 离婚概率：(400,000/1,200,000)*50% = 16.7%
+
+• 资产分割：妻子获得70%资产
+
+• 结果：丈夫获得600,000，妻子获得1,400,000
+
+场景3：性格不合离婚
+
+• 夫妻资产：丈夫1,500,000，妻子1,200,000
+
+• 离婚概率：5%
+
+• 离婚原因：性格不合
+
+• 资产分割：妻子获得60%资产
+
+• 结果：丈夫获得1,080,000，妻子获得720,000
+
+🌟 游戏体验提升
+
+1. 真实婚姻模拟：反映现实婚姻中的经济因素和性别角色
+
+2. 策略深度增加：婚姻成为需要精心管理的战略要素
+
+3. 情感因素引入：求婚的浪漫与离婚的情感冲击
+
+4. 法律与经济元素：资产分割、抚养权和赡养费
+
+5. 长期游戏价值：多段婚姻的人生体验
+
+这个求婚与离婚策略系统为游戏增加了真实性和挑战性，玩家需要精心规划求婚策略，维护婚姻关系，并在必要时应对离婚带来的挑战，体验财富人生的复杂情感与财务决策！

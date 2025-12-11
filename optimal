@@ -1,0 +1,918 @@
+------------lisp----------------
+(defun read-lisp-file (filename)
+  "高效读取 Lisp 文件并返回内容字符串。"
+  (with-temp-buffer
+    (insert-file-contents-literally filename)
+    (buffer-string)))
+
+(defun tokenize-lisp (lisp-code)
+  "使用状态机高效地将 Lisp 代码转换为 tokens。"
+  (let ((tokens '())
+        (in-string nil)
+        (in-comment nil)
+        (escape-next nil)
+        (current-token "")
+        (i 0)
+        (len (length lisp-code)))
+    
+    (cl-loop while (< i len) do
+             (let ((char (aref lisp-code i)))
+               (cond
+                (in-comment
+                 (when (eq char ?\n)
+                   (setq in-comment nil)))
+                
+                (in-string
+                 (cond
+                  (escape-next
+                   (setq current-token (concat current-token (string char)))
+                   (setq escape-next nil))
+                  ((eq char ?\\)
+                   (setq escape-next t)
+                   (setq current-token (concat current-token (string char))))
+                  ((eq char ?\")
+                   (setq current-token (concat current-token (string char)))
+                   (push current-token tokens)
+                   (setq current-token "")
+                   (setq in-string nil))
+                  (t
+                   (setq current-token (concat current-token (string char))))))
+                
+                (t
+                 (cond
+                  ((eq char ?\;)
+                   (setq in-comment t))
+                  ((eq char ?\")
+                   (unless (string-empty-p current-token)
+                     (push current-token tokens)
+                     (setq current-token ""))
+                   (setq in-string t)
+                   (setq current-token (string char)))
+                  ((memq char '(?\( ?\)))
+                   (unless (string-empty-p current-token)
+                     (push current-token tokens)
+                     (setq current-token ""))
+                   (push (string char) tokens))
+                  ((memq char '(?\s ?\t ?\n ?\r))
+                   (unless (string-empty-p current-token)
+                     (push current-token tokens)
+                     (setq current-token "")))
+                  (t
+                   (setq current-token (concat current-token (string char)))))))
+             
+             (setq i (1+ i)))
+    
+    (unless (string-empty-p current-token)
+      (push current-token tokens))
+    
+    (nreverse tokens)))
+
+(defun number-string-p (str)
+  "严格检查字符串是否可以转换为数字。"
+  (and (stringp str)
+       (not (string-empty-p str))
+       (string-match-p "\\`-?\\(?:[0-9]+\\.?[0-9]*\\|\\.[0-9]+\\)\\(?:[eE][-+]?[0-9]+\\)?\\'" str)
+       (not (string-match-p "\\`0[0-9]" str))))
+
+(defun parse-lisp-expression (tokens)
+  "高效解析 tokens 为多叉树结构。"
+  (let ((tree '())
+        (stack '())
+        (current-node nil))
+    
+    (dolist (token tokens)
+      (cond
+       ((string= token "(")
+        (push current-node stack)
+        (setq current-node (list :type "list" :children '())))
+       
+       ((string= token ")")
+        (if-let ((parent (pop stack)))
+            (progn
+              (setf (plist-get parent :children) 
+                    (nconc (plist-get parent :children) (list current-node)))
+              (setq current-node parent))
+          (push current-node tree)
+          (setq current-node nil)))
+       
+       (t
+        (let* ((node-type "symbol")
+               (value token)
+               (first-char (aref token 0))
+               (last-char (aref token (1- (length token)))))
+          
+          (cond
+           ((number-string-p token)
+            (setq node-type "number")
+            (setq value (string-to-number token)))
+           
+           ((and (>= (length token) 2)
+                 (eq first-char ?\")
+                 (eq last-char ?\"))
+            (setq node-type "string")
+            (setq value (substring token 1 -1)))
+           
+           ((string= token "t")
+            (setq node-type "boolean")
+            (setq value t))
+           
+           ((string= token "nil")
+            (setq node-type "boolean")
+            (setq value nil)))
+          
+          (let ((node (list :type node-type :value value)))
+            (if current-node
+                (setf (plist-get current-node :children)
+                      (nconc (plist-get current-node :children) (list node)))
+              (push node tree)))))))
+    
+    (when current-node
+      (push current-node tree))
+    
+    (nreverse tree)))
+
+(defun insert-tree-pretty (node &optional prefix is-last depth)
+  "以美观的树形格式插入结构到当前缓冲区。"
+  (unless depth (setq depth 0))
+  (unless prefix (setq prefix ""))
+  
+  (let ((node-prefix (if is-last
+                         (concat prefix "└── ")
+                       (concat prefix "├── "))))
+    
+    (if (string= (plist-get node :type) "list")
+        (progn
+          (insert (format "%s[list]\n" node-prefix))
+          (let ((child-prefix (if is-last
+                                  (concat prefix "    ")
+                                (concat prefix "│   ")))
+                (children (plist-get node :children)))
+            (cl-loop for child in children
+                     for i from 0
+                     do (insert-tree-pretty child child-prefix 
+                                           (= i (1- (length children))) 
+                                           (1+ depth)))))
+      
+      (let ((value (plist-get node :value))
+            (type (plist-get node :type)))
+        (insert (format "%s%s: %s\n" node-prefix type
+                        (cond
+                         ((string= type "string") (format "\"%s\"" value))
+                         ((string= type "boolean") (if value "t" "nil"))
+                         (t (format "%s" value)))))))))
+
+(defun json-escape-string (str)
+  "转义字符串中的特殊字符以用于JSON。"
+  (replace-regexp-in-string
+   "\"" "\\\\\""
+   (replace-regexp-in-string
+    "\\\\" "\\\\\\\\"
+    (replace-regexp-in-string
+     "\n" "\\\\n"
+     (replace-regexp-in-string
+      "\r" "\\\\r"
+      (replace-regexp-in-string
+       "\t" "\\\\t" str))))))
+
+(defun tree-to-json (node)
+  "高效将树结构转换为 JSON 字符串。"
+  (if (string= (plist-get node :type) "list")
+      (let ((children-json 
+             (mapconcat #'tree-to-json (plist-get node :children) ",")))
+        (format "{\"type\":\"list\",\"children\":[%s]}" children-json))
+    
+    (let ((type (plist-get node :type))
+          (value (plist-get node :value)))
+      (format "{\"type\":\"%s\",\"value\":%s}" type
+              (cond
+               ((string= type "string") 
+                (format "\"%s\"" (json-escape-string value)))
+               ((string= type "boolean") (if value "true" "false"))
+               (t (format "%s" value)))))))
+
+(defun process-lisp-file-to-tree-json (filename)
+  "处理指定的 Lisp 文件并将结果插入到 *tree-json* 缓冲区。"
+  (let ((content (read-lisp-file filename))
+        (tokens (tokenize-lisp (read-lisp-file filename)))
+        (tree (parse-lisp-expression tokens)))
+    
+    (with-current-buffer (get-buffer-create "*tree-json*")
+      (erase-buffer)
+      (lisp-tree-viewer-mode)
+      (insert (format "Parsing Lisp file: %s\n\n" filename))
+      (insert "Multi-way tree structure:\n")
+      (insert "=========================\n")
+      
+      (dolist (node tree)
+        (insert-tree-pretty node)
+        (insert "\n"))
+      
+      ;; 添加分隔空行
+      (insert "\n\n")
+      
+      (insert "JSON representation:\n")
+      (insert "====================\n")
+      
+      (if (= (length tree) 1)
+          (insert (format "%s\n" (tree-to-json (car tree))))
+        (let ((root (list :type "list" :children tree)))
+          (insert (format "%s\n" (tree-to-json root)))))
+      
+      (goto-char (point-min))
+      (display-buffer (current-buffer)))))
+
+;;; 交互命令
+(defun lisp-tree-viewer ()
+  "交互式选择 Lisp 文件并在 *tree-json* 缓冲区中显示树结构。"
+  (interactive)
+  (let ((filename (read-file-name "Select Lisp file: " nil nil t)))
+    (process-lisp-file-to-tree-json filename)))
+
+(defun lisp-tree-viewer-eval (expr)
+  "评估 Lisp 表达式并在 *tree-json* 缓冲区中显示树结构。"
+  (interactive "sEnter Lisp expression: ")
+  (let ((tokens (tokenize-lisp expr))
+        (tree (parse-lisp-expression tokens)))
+    
+    (with-current-buffer (get-buffer-create "*tree-json*")
+      (erase-buffer)
+      (lisp-tree-viewer-mode)
+      (insert (format "Evaluating expression: %s\n\n" expr))
+      (insert "Multi-way tree structure:\n")
+      (insert "=========================\n")
+      
+      (dolist (node tree)
+        (insert-tree-pretty node)
+        (insert "\n"))
+      
+      (insert "\n\n")
+      
+      (insert "JSON representation:\n")
+      (insert "====================\n")
+      
+      (if (= (length tree) 1)
+          (insert (format "%s\n" (tree-to-json (car tree))))
+        (let ((root (list :type "list" :children tree)))
+          (insert (format "%s\n" (tree-to-json root)))))
+      
+      (goto-char (point-min))
+      (display-buffer (current-buffer)))))
+
+;;; 主要模式定义
+(define-derived-mode lisp-tree-viewer-mode special-mode "Lisp Tree Viewer"
+  "Major mode for viewing Lisp tree structures."
+  (setq truncate-lines t)
+  (setq show-trailing-whitespace nil)
+  (setq buffer-read-only t)
+  (font-lock-mode 1))
+
+;;; 按键绑定
+(defvar lisp-tree-viewer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "q") 'quit-window)
+    (define-key map (kbd "g") 'lisp-tree-viewer)
+    (define-key map (kbd "e") 'lisp-tree-viewer-eval)
+    (define-key map (kbd "n") 'forward-button)
+    (define-key map (kbd "p") 'backward-button)
+    (define-key map (kbd "RET") 'push-button)
+    map)
+  "Keymap for Lisp Tree Viewer mode.")
+
+
+;;;###autoload
+(defun lisp-tree-viewer-file (filename)
+  "打开 Lisp 文件并在 *tree-json* 缓冲区中显示其树结构。"
+  (interactive "fLisp file: ")
+  (process-lisp-file-to-tree-json filename))
+(provide 'lisp-tree-viewer)
+
+------------optimal color ------
+(deftheme imperial-gold "imperial theme")
+
+;; 简化颜色定义
+(setq imperial-gold/colors
+      '(("#0a0814" . dawn-dim)      ; 玄夜背景
+        ("#c23b3b" . royal-blood)   ; 函数/变量定义血色
+        ("#e6b422" . imperial-gold) ; 注释金色
+        ("#fffaf0" . ivory-milk)    ; 普通字符乳白
+        ("#fffff1" . cream)         ; 高亮乳白
+        ("#ffed8a" . gold-light)    ; 辅助金色
+        ("#fc7f22" . crimson-shadow); 血色阴影 orange
+        ("#5d3a9b" . regal-purple)  ; 装饰紫色
+        ("#1f1b24" . night-sky)     ; 非激活模式行背景 night black
+        ("#a81159" . light-red)))   ; 非激活模式行前景light red
+
+;; 辅助函数：获取颜色值
+(defun imperial-color (name)
+  "根据名称获取颜色值"
+  (car (rassoc name imperial-gold/colors)))
+
+(custom-theme-set-faces
+ 'imperial-gold
+ ;; == 核心规则 ==
+ `(default ((t :background ,(imperial-color 'dawn-dim)
+               :foreground ,(imperial-color 'imperial-gold))))
+  
+ ;; 语法高亮
+ `(font-lock-keyword-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-builtin-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-constant-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-type-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-doc-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-string-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(font-lock-warning-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ 
+ ;; 特殊高亮
+ `(company-tooltip-common-selection ((t :background "red" :foreground "black")))
+ `(completions-common-part ((t :foreground "moccasin")))
+ `(elisp-shorthand-font-lock-face ((t :inherit font-lock-keyword-face :foreground "Red1")))
+ `(link ((t :foreground "dark red" :underline t)))
+ `(secondary-selection ((t :extend t :background "dark red")))
+ `(shadow ((t :foreground "dark red")))
+ `(tab-bar ((t :inherit variable-pitch :background "dark red" :foreground "black")))
+ `(tab-line ((t :inherit variable-pitch :background "dark red" :foreground "black" :height 0.9)))
+ `(tool-bar ((t :background "dark red" :foreground "black" :box (:line-width (1 . 1) :style released-button))))
+ 
+ ;; 函数/变量定义处 - 血色
+ `(font-lock-function-name-face ((t :foreground ,(imperial-color 'royal-blood) :bold t)))
+ `(font-lock-variable-name-face ((t :foreground ,(imperial-color 'royal-blood))))
+ 
+ ;; 注释
+ `(font-lock-comment-face ((t :foreground ,(imperial-color 'ivory-milk) :italic t)))
+ 
+ ;; == 其他 UI 元素 ==
+ `(line-number ((t :foreground ,(imperial-color 'light-red)
+                   :background ,(imperial-color 'dawn-dim))))
+ `(line-number-current-line ((t :foreground ,(imperial-color 'regal-purple)
+                                :background ,(imperial-color 'crimson-shadow))))
+ `(minibuffer-prompt ((t :foreground ,(imperial-color 'imperial-gold) :weight bold)))
+ `(highlight ((t :background ,(imperial-color 'crimson-shadow))))
+ `(match ((t :foreground ,(imperial-color 'light-red)
+             :background ,(imperial-color 'gold-light))))
+ `(occur-match ((t :foreground ,(imperial-color 'light-red)
+                   :background ,(imperial-color 'gold-light))))
+ 
+ ;; 自定义 mode-line
+ `(mode-line ((t :background ,(imperial-color 'regal-purple)
+                 :foreground ,(imperial-color 'imperial-gold)
+                 :box nil
+                 :height 1.05)))
+ `(mode-line-inactive ((t :background ,(imperial-color 'night-sky) 
+                          :foreground ,(imperial-color 'light-red))))
+ `(mode-line-buffer-face ((t :foreground ,(imperial-color 'imperial-gold) :weight bold)))
+ `(mode-line-position-face ((t :foreground ,(imperial-color 'imperial-gold))))
+ `(mode-line-git-face ((t :foreground ,(imperial-color 'crimson-shadow))))
+ 
+ ;; 以下是一些特殊的面部设置，简化处理
+ `(link-visited ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp-inlay-hint-face ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp-inlay-hint-parameter-face ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp ((t :background ,(imperial-color 'crimson-shadow))))
+ `(org-footnote ((t :background ,(imperial-color 'crimson-shadow))))
+ `(org-table ((t :background ,(imperial-color 'crimson-shadow))))
+ `(org-table-row ((t :background ,(imperial-color 'crimson-shadow))))
+ `(org-table-header ((t :background ,(imperial-color 'crimson-shadow))))
+ `(org-sexp-date ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lazy-highlight ((t :background ,(imperial-color 'crimson-shadow))))
+ `(undo-tree-visualizer-unmodified-face ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp-ui-doc-highlight-hover ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp-ui-peek-line-number ((t :background ,(imperial-color 'crimson-shadow))))
+ `(region ((t :background ,(imperial-color 'crimson-shadow))))
+ `(tab-bar-tab-inactive ((t :background ,(imperial-color 'crimson-shadow))))
+ `(tab-bar-tab-group-inactive ((t :background ,(imperial-color 'crimson-shadow))))
+ `(tab-bar-tab-ungrouped ((t :background ,(imperial-color 'crimson-shadow))))
+ `(escape-glyph ((t :background ,(imperial-color 'crimson-shadow))))
+ `(lsp-modeline-code-actions-face ((t :background ,(imperial-color 'crimson-shadow))))
+ 
+ ;; 括号匹配
+ `(show-paren-match ((t :background ,(imperial-color 'crimson-shadow)
+                        :foreground ,(imperial-color 'gold-light)
+                        :weight ultra-bold
+                        :box (:line-width -1 :color ,(imperial-color 'royal-blood)))))
+ `(show-paren-mismatch ((t :background ,(imperial-color 'royal-blood)
+                           :foreground ,(imperial-color 'crimson-shadow)
+                           :weight ultra-bold)))
+)
+
+;; ======================================================================
+;; == 递归括号可视化系统 ==
+;; ======================================================================
+(setq imperial-gold/bracket-colors
+      (list (imperial-color 'imperial-gold) ; 1. 帝王金
+            (imperial-color 'royal-blood)   ; 2. 血色
+            (imperial-color 'ivory-milk)    ; 3. 乳白
+            (imperial-color 'gold-light)    ; 4. 亮金
+            (imperial-color 'regal-purple))) ; 5. 紫金
+
+(defun imperial-gold/setup-bracket-colors ()
+  "应用帝王金主题的递归括号配色"
+  (let ((depth-colors (make-vector 10 nil)))
+    (dotimes (i 10)
+      (setf (aref depth-colors i)
+            `((t :foreground ,(nth (mod i 5) imperial-gold/bracket-colors) 
+                 :weight ultra-bold))))
+    
+    (custom-theme-set-faces
+     'imperial-gold
+     ;; 小括号
+     `(rainbow-delimiters-depth-1-face ,(aref depth-colors 0))
+     `(rainbow-delimiters-depth-2-face ,(aref depth-colors 1))
+     `(rainbow-delimiters-depth-3-face ,(aref depth-colors 2))
+     `(rainbow-delimiters-depth-4-face ,(aref depth-colors 3))
+     `(rainbow-delimiters-depth-5-face ,(aref depth-colors 4))
+     `(rainbow-delimiters-depth-6-face ,(aref depth-colors 0))
+     `(rainbow-delimiters-depth-7-face ,(aref depth-colors 1))
+     `(rainbow-delimiters-depth-8-face ,(aref depth-colors 2))
+     `(rainbow-delimiters-depth-9-face ,(aref depth-colors 3))
+     
+     ;; 大括号
+     `(rainbow-delimiters-depth-1-curly-face ,(aref depth-colors 1))
+     `(rainbow-delimiters-depth-2-curly-face ,(aref depth-colors 2))
+     `(rainbow-delimiters-depth-3-curly-face ,(aref depth-colors 3))
+     `(rainbow-delimiters-depth-4-curly-face ,(aref depth-colors 4))
+     `(rainbow-delimiters-depth-5-curly-face ,(aref depth-colors 0))
+     `(rainbow-delimiters-depth-6-curly-face ,(aref depth-colors 1))
+     `(rainbow-delimiters-depth-7-curly-face ,(aref depth-colors 2))
+     `(rainbow-delimiters-depth-8-curly-face ,(aref depth-colors 3))
+     `(rainbow-delimiters-depth-9-curly-face ,(aref depth-colors 4)))))
+
+;; 配置括号颜色
+(imperial-gold/setup-bracket-colors)
+
+;; ======================================================================
+;; == 自动启用递归括号可视化 ==
+;; ======================================================================
+(defun imperial-gold/bracket-visualization ()
+  "为所有编程模式启用递归括号可视化"
+  (require 'rainbow-delimiters)
+  (rainbow-delimiters-mode t)
+  (show-paren-mode t))
+
+;; 添加到所有编程模式的hook
+(add-hook 'prog-mode-hook #'imperial-gold/bracket-visualization)
+
+;; 提供主题
+(provide-theme 'imperial-gold)
+;;; imperial-mode-line.el --- Imperial theme mode-line configuration  -*- lexical-binding: t; -*-
+
+(defgroup imperial-mode-line nil
+  "Customization options for Imperial mode-line."
+  :group 'mode-line)
+
+(defcustom imperial-mode-line-show-time t
+  "Whether to show time in the mode-line."
+  :type 'boolean
+  :group 'imperial-mode-line)
+
+(defcustom imperial-mode-line-show-git t
+  "Whether to show Git branch information in the mode-line."
+  :type 'boolean
+  :group 'imperial-mode-line)
+
+(defcustom imperial-mode-line-time-format "%H:%M"
+  "Format string for time display in mode-line.
+See `format-time-string' for available format options."
+  :type 'string
+  :group 'imperial-mode-line)
+
+;; Git 分支获取函数
+(defun imperial/mode-line-git-branch ()
+  "Return current Git branch or empty string if not in a Git repo."
+  (when (and imperial-mode-line-show-git
+             (buffer-file-name)
+             (file-exists-p (buffer-file-name))
+             (executable-find "git"))
+    (let ((default-directory (file-name-directory (buffer-file-name))))
+      (with-temp-buffer
+        (when (eq 0 (call-process "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD"))
+          (string-trim (buffer-string)))))))
+
+;; 文件修改状态指示器
+(defun imperial/mode-line-buffer-status ()
+  "Return a status indicator based on buffer modification state."
+  (cond ((buffer-modified-p) "🔴")  ; 红色圆点表示已修改
+        ((buffer-read-only-p) "🔒") ; 锁表示只读
+        (t "🟢")))                 ; 绿色圆点表示未修改
+
+;; 静态时间变量（每个缓冲区独立）
+(defvar-local imperial/mode-line-static-time nil
+  "Static time for each buffer, set when the buffer is first displayed.")
+
+;; 设置静态时间（只在第一次显示时设置）
+(defun imperial/mode-line-set-static-time ()
+  "Set static time for current buffer if not already set."
+  (when (and imperial-mode-line-show-time (not imperial/mode-line-static-time))
+    (setq imperial/mode-line-static-time (format-time-string imperial-mode-line-time-format))))
+
+;; 设置 mode-line 格式
+(defun imperial/mode-line-format ()
+  "Return the mode-line format for Imperial theme."
+  (list
+   ;; 左侧部分
+   '(:eval (imperial/mode-line-buffer-status))
+   " "
+   '(:propertize "%b" face mode-line-buffer-face) ; 缓冲区名称
+   " "
+   '(:propertize "(%l,%c)" face mode-line-position-face) ; 行号列号
+   " "
+   '(:eval (when-let ((branch (imperial/mode-line-git-branch)))
+             (concat "[" branch "]")))
+   
+   ;; 中间填充空间
+   '(:propertize " " display ((space :align-to (- right 20))))
+   
+   ;; 右侧部分 - 静态时间
+   '(:eval (when imperial-mode-line-show-time imperial/mode-line-static-time))
+   ))
+
+;; 设置 mode-line 外观
+(defun imperial/mode-line-set-faces ()
+  "Set mode-line faces for Imperial theme."
+  (custom-set-faces
+   `(mode-line ((t :background ,(imperial-color 'regal-purple)
+                   :foreground ,(imperial-color 'imperial-gold)
+                   :box nil
+                   :height 1.05
+                   :weight bold)))
+   `(mode-line-inactive ((t :background ,(imperial-color 'night-sky) 
+                            :foreground ,(imperial-color 'light-red)
+                            :box nil
+                            :height 0.9)))
+   `(mode-line-buffer-face ((t :foreground ,(imperial-color 'imperial-gold)
+                               :weight bold)))
+   `(mode-line-position-face ((t :foreground ,(imperial-color 'gold-light))))
+   `(mode-line-highlight ((t :background ,(imperial-color 'crimson-shadow)
+                             :foreground ,(imperial-color 'ivory-milk))))
+   `(mode-line-emphasis ((t :weight bold
+                            :foreground ,(imperial-color 'royal-blood))))))
+
+;; 主函数：启用 Imperial mode-line
+(defun imperial-mode-line-enable ()
+  "Enable Imperial mode-line configuration."
+  (interactive)
+  ;; 设置 mode-line 格式
+  (setq-default mode-line-format (imperial/mode-line-format))
+  
+  ;; 设置 mode-line 外观
+  (imperial/mode-line-set-faces)
+  
+  ;; 添加钩子设置静态时间
+  (add-hook 'window-buffer-change-functions
+            (lambda (_) (imperial/mode-line-set-static-time)))
+  
+  (message "Imperial mode-line enabled"))
+
+;; 主函数：禁用 Imperial mode-line
+(defun imperial-mode-line-disable ()
+  "Disable Imperial mode-line configuration."
+  (interactive)
+  ;; 恢复默认 mode-line 格式
+  (kill-local-variable 'mode-line-format)
+  
+  ;; 移除钩子
+  (remove-hook 'window-buffer-change-functions
+               (lambda (_) (imperial/mode-line-set-static-time)))
+  
+  (message "Imperial mode-line disabled"))
+
+;; 提供模式
+(provide 'imperial-mode-line)
+
+;;; imperial-mode-line.el ends here
+
+--------------ediff layout--------
+
+
+	(defvar window-i nil)
+(defvar window-io nil)
+(defvar window-main nil)
+(defvar split-window-enabled nil)
+(defvar imperial-layout-count 0)
+(defvar imperial-layout-pre-ediff-config nil)
+
+;; 定义窗口显示规则
+(setq display-buffer-alist
+      `(
+        ;; Rule 1: 系统消息类缓冲区（复用窗口模式）
+        (,(regexp-opt '("*Messages*" "*undo-tree*" "*Help*" "*godoc*" 
+                        "*Completions*" "*compilation*" "*Occur*") 'words)
+         (display-buffer-reuse-window)
+         (window . ,(lambda (buffer alist)
+                      (or window-i (get-window-with-purpose "I")))))
+
+        ;; Rule 2: Go源代码文件（排除系统目录）
+        (,(concat (regexp-opt '(".go")) "\\'")
+         (display-buffer-reuse-window)
+         (window . ,(lambda (buffer alist)
+                      (or window-i (get-window-with-purpose "I"))))
+         (unless (string-match-p "/usr/" (or (buffer-file-name buffer) ""))))
+
+        ;; Rule 3: 通讯类缓冲区（固定至IO窗口）
+        (,(regexp-opt '("*ERC*" "Buffer List*" "*mail*" "*gnus*" 
+                        "*Group*" "*Summary*" "*Article*") 'words)
+         (display-buffer-reuse-window)
+         (window . ,(lambda (buffer alist)
+                      (or window-io (get-window-with-purpose "io")))))
+
+        ;; Rule 4: Ediff 控制缓冲区特殊处理
+        ("\\*Ediff Control\\*"
+         (display-buffer-reuse-window)
+         (window . ,(lambda (buffer alist)
+                      (or window-i (get-window-with-purpose "I")))))
+        
+        ;; Rule 5: 默认规则（主窗口显示）
+        (".*"  ; 兜底匹配所有缓冲区
+         (display-buffer-same-window)
+         (window . ,(lambda (buffer alist)
+                      (or window-main (get-window-with-purpose "main")))))
+        ))
+
+(defun imperial-layout-on ()
+  "启用分屏模式"
+  (interactive)
+  (setq split-window-enabled t)
+  (message "分屏已启用"))
+
+(defun imperial-layout-off ()
+  "禁用分屏模式"
+  (interactive)
+  (setq split-window-enabled nil)
+  (message "分屏已禁用"))
+
+(defun imperial-layout-setup ()
+  "创建稳定的三窗格布局（左I/右io+main）"
+  (interactive)
+  (message "布局初始化第 %d 次" (setq imperial-layout-count (1+ imperial-layout-count))))
+  
+  (imperial-layout-on)
+  (delete-other-windows)
+
+  ;; 创建左侧I窗口 (宽度70列)
+  (setq window-i (split-window-horizontally 70))
+  (set-window-parameter window-i 'window-purpose "I")
+
+  ;; 创建右侧上下分割
+  (setq window-io (split-window-vertically))
+  (set-window-parameter window-io 'window-purpose "io")
+  
+  (setq window-main (next-window))
+  (set-window-parameter window-main 'window-purpose "main")
+  
+  ;; 设置默认缓冲区
+  (with-selected-window window-i (switch-to-buffer "*Completions*"))
+  (with-selected-window window-io (switch-to-buffer "*erc*"))
+  (with-selected-window window-main (switch-to-buffer "*scratch*"))
+  
+  (imperial-layout-off))
+
+(defun get-window-with-purpose (purpose)
+  "查找指定用途的窗口"
+  (cl-find-if
+   (lambda (w) (equal (window-parameter w 'window-purpose) purpose))
+   (window-list)))
+
+(defun imperial-layout-ensure ()
+  "确保三窗格布局存在，若不存在则创建"
+  (unless (and (window-live-p window-i)
+               (window-live-p window-io)
+               (window-live-p window-main))
+    (imperial-layout-setup)
+    (message "Imperial布局已创建")))
+
+;; Ediff 相关函数
+(defun imperial-layout-before-ediff ()
+  "Ediff 前的准备工作"
+  (imperial-layout-ensure)
+  (setq imperial-layout-pre-ediff-config (current-window-configuration))
+  
+  ;; 确保窗口用途正确
+  (set-window-parameter window-i 'window-purpose "I")
+  (set-window-parameter window-io 'window-purpose "io")
+  (set-window-parameter window-main 'window-purpose "main")
+  
+  ;; 设置 ediff 窗口拆分函数以使用我们的布局
+  (setq ediff-split-window-function 'imperial-layout-ediff-split-window)
+  (setq ediff-window-setup-function 'imperial-layout-ediff-setup))
+
+(defun imperial-layout-after-ediff ()
+  "Ediff 后的清理工作"
+  (when imperial-layout-pre-ediff-config
+    (set-window-configuration imperial-layout-pre-ediff-config)
+    (setq imperial-layout-pre-ediff-config nil)))
+
+(defun imperial-layout-ediff-split-window (&optional window)
+  "自定义 ediff 窗口分割函数"
+  (or window (setq window (selected-window)))
+  (if (and (window-live-p window-io) (window-live-p window-main))
+      (list window-io window-main)
+    (split-window window (/ (window-height window) 2))))
+
+(defun imperial-layout-ediff-setup ()
+  "自定义 ediff 窗口设置"
+  (imperial-layout-ensure)
+  (let ((control-frame (ediff-get-visible-buffer-window "*Ediff Control*")))
+    (if control-frame
+        (select-window control-frame)
+      (select-window window-i))
+    
+    (ediff-setup-windows 
+     (ediff-get-buffer ediff-buffer-A)
+     (ediff-get-buffer ediff-buffer-B)
+     (ediff-get-buffer ediff-buffer-C)
+     ediff-window-setup-function)))
+
+;; 添加 ediff 钩子
+(add-hook 'ediff-before-setup-hook #'imperial-layout-before-ediff)
+(add-hook 'ediff-quit-hook #'imperial-layout-after-ediff)
+(add-hook 'ediff-suspend-hook #'imperial-layout-after-ediff)
+
+;; 窗口分割拦截函数
+(defun imperial-layout-split-wrapper (orig-fun &rest args)
+  "根据 split-window-enabled 决定是否允许分屏"
+  (if split-window-enabled
+      (apply orig-fun args)
+    (ding)
+    nil))
+
+;; 应用拦截建议
+(dolist (func '(split-window split-window-horizontally 
+               split-window-vertically split-window-sensibly))
+  (advice-add func :around #'imperial-layout-split-wrapper))
+
+;; 启动时确保布局存在
+(add-hook 'after-init-hook #'imperial-layout-ensure)
+
+(provide 'imperial-layout)
+-------------------------------
+(defun insert-multiway-tree (tree &optional indent-last indent-str)
+  "在当前缓冲区插入多叉树结构，使用文本符号创建树形视图。
+
+参数:
+TREE: 要插入的多叉树（列表形式）
+INDENT-LAST: 当前节点是否为分支中最后一个（内部递归使用）
+INDENT-STR: 缩进字符串（内部递归使用）
+
+示例:
+(insert-multiway-tree '(A (B C) D))"
+  (unless (or (listp tree) (stringp tree) (symbolp tree))
+    (error "无效的树结构: %s" tree))
+  
+  (let* ((is-top (not indent-str))
+         (prefix (cond (is-top "")     ; 顶级节点
+                      (indent-last "└─ ") ; 分支最后一个节点
+                      (t "├─ ")))     ; 分支中间节点
+         (current-indent (or indent-str ""))
+         (children-indent (cond (is-top "") 
+                               (indent-last "    ")
+                               (t "│   "))))
+    
+    ;; 插入当前节点
+    (insert current-indent)
+    (insert prefix)
+    (if (listp tree)
+        (insert (format "%s" (or (car tree) "•")))  ; 空节点显示•
+      (insert (format "%s" tree)))
+    (insert "\n")
+    
+    ;; 递归处理子节点
+    (when (and (listp tree) (cdr tree))
+      (let* ((children (cdr tree))
+             (last-idx (1- (length children))))
+        (dotimes (i (length children))
+          (let* ((child (nth i children))
+                 (is-last (= i last-idx))
+                 (new-indent (concat current-indent children-indent)))
+            (insert-multiway-tree child is-last new-indent)))))))
+
+(defun display-multiway-tree (tree &optional buffer-name)
+  "在专用缓冲区中显示多叉树结构。
+
+参数:
+TREE: 要显示的多叉树
+BUFFER-NAME: 缓冲区名称（可选，默认为\"*Tree View*\"）
+
+示例:
+(display-multiway-tree '(A (B C) D) \"我的树\")"
+  (setq buffer-name (or buffer-name "*Tree View*"))
+  (let ((buffer (get-buffer-create buffer-name)))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (insert-multiway-tree tree)
+      (special-mode)  ; 使用特殊模式避免编辑
+      (view-mode-enter nil 'kill-buffer)) ; 进入查看模式，退出时关闭缓冲区
+    (display-buffer buffer)))
+
+;; 定义树显示符号（可供自定义）
+(defvar tree-display-symbols
+  '((:middle . "├─ ")    ; 分支中间节点
+    (:last   . "└─ ")    ; 分支末尾节点
+    (:vertical . "│  ")  ; 垂直线
+    (:space   . "   ")   ; 空格缩进
+    (:null    . "•"))    ; 空节点显示符号
+  "树结构显示符号定义")
+
+;; 示例树结构
+(defvar multiway-tree-example
+  '(A 
+    "Leaf Node"
+    (B 
+     (C 
+      "Leaf C1" 
+      "Leaf C2")
+     (D 
+      (E "Leaf E")))
+    (F 
+     (G 
+      (H "Leaf H1" "Leaf H2")
+      (I "Leaf I")))))
+
+;; 复杂树结构示例
+(defvar company-structure
+  '(组织架构
+    ("总经理"
+     ("技术部"
+      ("开发组" "前端小组" "后端小组")
+      ("测试组" "自动化测试" "手动测试"))
+     ("市场部"
+      ("品牌组" ("社交媒体" "传统媒体"))
+      ("销售组" "线上销售" "线下销售")))
+    ("财务部" "会计组" "审计组")))
+
+;; 目录结构示例
+(defvar document-structure
+  '(文档库
+    (技术文档
+     ("API参考" "端点1" "端点2" "端点3")
+     ("设计指南" "UI规范" "架构图"))
+    (商业文档
+     ("年度报告" "2023" "2024")
+     ("市场分析" "竞争分析" "用户画像"))))
+
+;; 在当前缓冲区插入树的函数
+(defun insert-tree-here (tree)
+  "在当前光标位置插入树结构。
+
+提示用户输入一个树结构，然后在当前光标位置插入该树的图形表示。"
+  (interactive "XTree: ")
+  (insert-multiway-tree tree))
+
+;; 提供模式
+(provide 'multiway-tree-display)
+----------------test--------------
+;;; multiway-tree-display.el ends here
+测试1-基本树:
+A
+├─ Leaf Node
+├─ B
+│  ├─ C
+│  │  ├─ Leaf C1
+│  │  └─ Leaf C2
+│  └─ D
+│     └─ E
+│        └─ Leaf E
+└─ F
+   └─ G
+      ├─ H
+      │  ├─ Leaf H1
+      │  └─ Leaf H2
+      └─ I
+         └─ Leaf I
+
+测试2-公司结构:
+组织架构
+├─ 总经理
+│  ├─ 技术部
+│  │  ├─ 开发组
+│  │  │  ├─ 前端小组
+│  │  │  └─ 后端小组
+│  │  └─ 测试组
+│  │     ├─ 自动化测试
+│  │     └─ 手动测试
+│  └─ 市场部
+│     ├─ 品牌组
+│     │  └─ 社交媒体
+│     │     └─ 传统媒体
+│     └─ 销售组
+│        ├─ 线上销售
+│        └─ 线下销售
+└─ 财务部
+   ├─ 会计组
+   └─ 审计组
+
+测试6-自定义符号:
+A
+|-> Leaf Node
+|-> B
+|  |-> C
+|  |  |-> Leaf C1
+|  |  `-> Leaf C2
+|  `-> D
+|     `-> E
+|        `-> Leaf E
+`-> F
+   `-> G
+      |-> H
+      |  |-> Leaf H1
+      |  `-> Leaf H2
+      `-> I
+         `-> Leaf I

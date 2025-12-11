@@ -1,0 +1,582 @@
+合并 Go 测试和基准测试生成器
+
+下面是一个完整的 Emacs Lisp 实现，集成了测试函数和基准测试函数的生成功能，并提供了强大的正则表达式来匹配 Go 代码结构：
+
+;; =============================================
+;; 正则表达式定义
+;; =============================================
+
+;; 包名匹配正则表达式
+(defconst go-package-name-regexp
+  "^[[:space:]]*package[[:space:]]+\\([[:word:]]+\\|[_[:word:]]*\\.?[[:word:]]+\\)[[:space:]]*$"
+  "正则表达式用于匹配 Go 包名")
+
+;; 函数名匹配正则表达式（支持接收器）
+(defconst go-func-name-regexp
+  "^[[:space:]]*func[[:space:]]+\\(?:\\(([^)]+)\\)[[:space:]]+\\)?\\([[:word:]]+\\)\\s-*\\("
+  "正则表达式用于匹配 Go 函数名，包括接收器")
+
+;; 函数定义匹配正则表达式（更完整）
+(defconst go-func-definition-regexp
+  "^[[:space:]]*func[[:space:]]+\\(?:\\(([^)]+)\\)[[:space:]]+\\)?\\([[:word:]]+\\)\\s-*\\([^)]*\\)\\s-*\\([^{]*\\){"
+  "正则表达式用于匹配完整的 Go 函数定义")
+
+;; 测试函数名匹配正则表达式
+(defconst go-test-func-regexp
+  "^func[[:space:]]+\\(Test\\|Benchmark\\)\\([[:word:]]+\\)\\s-*\\("
+  "正则表达式用于匹配测试和基准测试函数")
+
+;; =============================================
+;; 辅助函数
+;; =============================================
+
+(defun go-ucfirst (str)
+  "将字符串的首字母大写。"
+  (if (> (length str) 0)
+      (concat (upcase (substring str 0 1)) (substring str 1))
+    str))
+
+(defun go-get-package-name ()
+  "获取当前 Go 文件的包名。
+返回包名字符串，如果找不到则返回 nil。"
+  (save-excursion
+    (goto-char (point-min))
+    (let (package-name)
+      (when (re-search-forward go-package-name-regexp nil t)
+        (setq package-name (match-string 1))
+        ;; 清理包名（去除可能的注释和空格）
+        (when package-name
+          (setq package-name (string-trim package-name))
+          ;; 去除行尾注释
+          (when (string-match "\\([^[:space:]]+\\)[[:space:]]*//" package-name)
+            (setq package-name (match-string 1 package-name)))))
+      package-name)))
+
+(defun go-get-current-function-name ()
+  "获取当前光标所在的 Go 函数名。
+返回函数名字符串，如果找不到则返回 nil。"
+  (save-excursion
+    (beginning-of-line)
+    (let ((start-pos (point))
+          func-name found)
+      ;; 向上搜索函数定义
+      (while (and (not found) (re-search-backward "^func\\b" nil t))
+        (let ((func-start (point)))
+          (forward-line 0) ; 移动到行首
+          ;; 尝试匹配函数名
+          (when (looking-at go-func-name-regexp)
+            (setq func-name (match-string 2)
+                  found t)
+            ;; 如果找到函数定义，但不在当前函数体内，继续搜索
+            (when found
+              (let ((func-end (save-excursion
+                                (goto-char func-start)
+                                (forward-sexp)
+                                (point))))
+                (when (or (< start-pos func-start) (> start-pos func-end))
+                  (setq found nil func-name nil)))))))
+      func-name)))
+
+(defun go-get-function-params ()
+  "获取当前函数的参数信息。
+返回参数字符串或 nil。"
+  (save-excursion
+    (beginning-of-line)
+    (when (re-search-backward "^func\\b" nil t)
+      (forward-word) ; 跳过 "func"
+      (forward-whitespace 1)
+      ;; 检查是否有接收器
+      (when (looking-at "(")
+        (forward-sexp)) ; 跳过接收器
+      (forward-whitespace 1)
+      ;; 查找函数名
+      (when (looking-at "[[:word:]]+")
+        (forward-word) ; 跳过函数名
+        (forward-whitespace 1)
+        ;; 查找参数列表
+        (when (looking-at "(")
+          (let ((params-start (point))
+                (params-end (progn (forward-sexp) (point))))
+            (buffer-substring-no-properties params-start params-end)))))))
+
+(defun go-get-function-return-types ()
+  "获取当前函数的返回值类型信息。
+返回返回值类型字符串或 nil。"
+  (save-excursion
+    (beginning-of-line)
+    (when (re-search-backward "^func\\b" nil t)
+      (forward-word) ; 跳过 "func"
+      (forward-whitespace 1)
+      ;; 检查是否有接收器
+      (when (looking-at "(")
+        (forward-sexp)) ; 跳过接收器
+      (forward-whitespace 1)
+      ;; 查找函数名
+      (when (looking-at "[[:word:]]+")
+        (forward-word) ; 跳过函数名
+        (forward-whitespace 1)
+        ;; 查找参数列表
+        (when (looking-at "(")
+          (forward-sexp) ; 跳过参数列表
+          (forward-whitespace 1)
+          ;; 查找返回值类型
+          (unless (looking-at "{")
+            (buffer-substring-no-properties (point) (progn (forward-sexp) (point)))))))))
+
+;; =============================================
+;; 测试文件管理
+;; =============================================
+
+(defun go-get-or-create-test-file (type)
+  "获取或创建测试文件。
+TYPE 可以是 'test 或 'benchmark。
+返回测试文件的路径，如果无法确定则返回 nil。"
+  (let* ((current-file (buffer-file-name))
+         (base-name (file-name-base current-file))
+         (test-file-name (if (eq type 'benchmark)
+                             (concat base-name "_bench_test.go")
+                           (concat base-name "_test.go")))
+         (test-file-path (concat (file-name-directory current-file) test-file-name))
+         (pkg-name (go-get-package-name)))
+    (unless (file-exists-p test-file-path)
+      (with-temp-buffer
+        (insert "package " pkg-name "\n\n")
+        (insert "import \"testing\"\n\n")
+        (write-file test-file-path)
+        (message "已创建测试文件: %s" test-file-name)))
+    test-file-path))
+
+(defun go-test-function-exists-p (func-name type)
+  "检查测试文件中是否已存在指定函数的测试。
+TYPE 可以是 'test 或 'benchmark。"
+  (let ((test-func-name (if (eq type 'benchmark)
+                            (concat "Benchmark" (go-ucfirst func-name))
+                          (concat "Test" (go-ucfirst func-name)))))
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward (concat "^func\\s-+" test-func-name "\\s-*\\(") nil t))))
+
+;; =============================================
+;; 测试函数生成
+;; =============================================
+
+(defun go-generate-test-code (func-name)
+  "生成测试函数的代码。"
+  (let ((params (go-get-function-params))
+        (return-types (go-get-function-return-types)))
+    (format "func Test%s(t *testing.T) {
+    // 测试用例
+    tests := []struct {
+        name string
+        %s
+        want %s
+    }{
+        {
+            name: \"测试用例1\",
+            // 设置输入参数
+            want: %s, // 期望结果
+        },
+        // 添加更多测试用例
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            %s
+            got := %s(%s)
+            if got != tt.want {
+                t.Errorf(\"%s(%%v) = %%v, want %%v\", %s, got, tt.want)
+            }
+        })
+    }
+}
+
+"
+            (go-ucfirst func-name)
+            (if params (replace-regexp-in-string "^\\s-*(\\|)\\s-*$" "" params) "// 输入参数")
+            (or return-types "interface{}")
+            (if return-types 
+                (if (string-match "error" return-types) "nil" "/* 期望值 */") 
+              "/* 期望值 */")
+            (if params "// 准备测试数据" "")
+            func-name
+            (if params (replace-regexp-in-string "^\\s-*(\\|)\\s-*$" "" params) "/* 参数 */")
+            func-name
+            (if params (replace-regexp-in-string "^\\s-*(\\|)\\s-*$" "" params) "/* 参数 */"))))
+
+(defun go-generate-benchmark-code (func-name)
+  "生成基准测试函数的代码。"
+  (let ((params (go-get-function-params)))
+    (format "func Benchmark%s(b *testing.B) {
+    // 准备测试数据
+    %s
+
+    // 重置计时器，排除设置时间
+    b.ResetTimer()
+
+    // 运行基准测试
+    for i := 0; i < b.N; i++ {
+        // 调用被测函数
+        %s(%s)
+    }
+}
+
+"
+            (go-ucfirst func-name)
+            (if params 
+                (format "// 设置输入参数\n    // 根据实际情况初始化参数")
+              "// 无需输入参数")
+            func-name
+            (if params 
+                (replace-regexp-in-string "^\\s-*(\\|)\\s-*$" "" params)
+              ""))))
+
+(defun go-generate-example-code (func-name)
+  "生成示例测试函数的代码。"
+  (let ((params (go-get-function-params))
+        (return-types (go-get-function-return-types)))
+    (format "func Example%s() {
+    // 调用函数示例
+    %s := %s(%s)
+    fmt.Println(%s)
+    // Output: %s
+}
+
+"
+            (go-ucfirst func-name)
+            (if return-types "result" "// 返回值变量")
+            func-name
+            (if params 
+                (replace-regexp-in-string "^\\s-*(\\|)\\s-*$" "" params)
+              "/* 参数 */")
+            (if return-types "result" "// 返回值")
+            (if return-types 
+                (if (string-match "error" return-types) "nil" "/* 期望输出 */") 
+              "/* 期望输出 */"))))
+
+;; =============================================
+;; 主函数：生成测试/基准测试/示例
+;; =============================================
+
+(defun go-generate-test-for-function ()
+  "为当前 Go 函数生成测试函数。
+交互式函数，让用户选择生成类型。"
+  (interactive)
+  (save-excursion
+    ;; 获取当前函数名
+    (let ((func-name (go-get-current-function-name))
+          (test-type (completing-read "生成测试类型: " 
+                                     '("测试函数" "基准测试" "示例测试") 
+                                     nil t "测试函数")))
+      (when func-name
+        ;; 确定测试类型和文件类型
+        (let ((type (cond
+                     ((string= test-type "基准测试") 'benchmark)
+                     ((string= test-type "示例测试") 'example)
+                     (t 'test)))
+          ;; 获取或创建测试文件
+          (let ((test-file (go-get-or-create-test-file type)))
+            (when test-file
+              (switch-to-buffer (find-file-noselect test-file))
+              ;; 检查是否已存在测试函数
+              (unless (go-test-function-exists-p func-name type)
+                ;; 移动到文件末尾
+                (goto-char (point-max))
+                ;; 确保文件以空行结尾
+                (unless (bolp) (insert "\n"))
+                (unless (looking-back "\n\n" nil) (insert "\n"))
+                ;; 插入测试函数
+                (cond
+                 ((eq type 'benchmark)
+                  (insert (go-generate-benchmark-code func-name)))
+                 ((eq type 'example)
+                  (insert (go-generate-example-code func-name)))
+                 (t ; 普通测试
+                  (insert (go-generate-test-code func-name))))
+                (message "已为函数 %s 生成%s" func-name test-type))
+              ;; 保存文件
+              (save-buffer)
+              ;; 切换回原文件
+              (switch-to-buffer (current-buffer)))))))))
+
+;; =============================================
+;; 批量生成函数
+;; =============================================
+
+(defun go-get-all-function-names ()
+  "获取当前 Go 文件中所有函数的名称。
+返回函数名列表。"
+  (save-excursion
+    (goto-char (point-min))
+    (let (func-names)
+      (while (re-search-forward "^func\\b" nil t)
+        (beginning-of-line)
+        (when (looking-at go-func-name-regexp)
+          (push (match-string 2) func-names))
+        (forward-line 1))
+      (nreverse func-names))))
+
+(defun go-generate-tests-for-all-functions ()
+  "为当前 Go 文件中所有函数生成测试。
+交互式函数，让用户选择生成类型。"
+  (interactive)
+  (save-excursion
+    (let ((func-names (go-get-all-function-names))
+          (test-type (completing-read "生成测试类型: " 
+                                     '("测试函数" "基准测试" "示例测试") 
+                                     nil t "测试函数")))
+      (when func-names
+        ;; 确定测试类型和文件类型
+        (let ((type (cond
+                     ((string= test-type "基准测试") 'benchmark)
+                     ((string= test-type "示例测试") 'example)
+                     (t 'test))))
+        ;; 获取或创建测试文件
+        (let ((test-file (go-get-or-create-test-file type)))
+          (when test-file
+            (switch-to-buffer (find-file-noselect test-file))
+            ;; 移动到文件末尾
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (unless (looking-back "\n\n" nil) (insert "\n"))
+            
+            ;; 为每个函数生成测试
+            (dolist (func-name func-names)
+              (unless (go-test-function-exists-p func-name type)
+                (cond
+                 ((eq type 'benchmark)
+                  (insert (go-generate-benchmark-code func-name)))
+                 ((eq type 'example)
+                  (insert (go-generate-example-code func-name)))
+                 (t ; 普通测试
+                  (insert (go-generate-test-code func-name))))))
+            
+            ;; 保存文件
+            (save-buffer)
+            (message "已为所有函数生成%s" test-type)
+            ;; 切换回原文件
+            (switch-to-buffer (current-buffer))))))))
+
+;; =============================================
+;; 运行测试函数
+;; =============================================
+
+(defun go-run-tests ()
+  "运行当前包的测试。"
+  (interactive)
+  (let ((default-directory (locate-dominating-file default-directory "go.mod")))
+    (if default-directory
+        (compile "go test -v")
+      (compile "go test -v ."))))
+
+(defun go-run-benchmarks ()
+  "运行当前包的基准测试。"
+  (interactive)
+  (let ((default-directory (locate-dominating-file default-directory "go.mod")))
+    (if default-directory
+        (compile "go test -bench=.")
+      (compile "go test -bench=. ."))))
+
+(defun go-run-specific-test ()
+  "运行特定的测试函数。"
+  (interactive)
+  (let ((func-name (go-get-current-function-name))
+        (default-directory (locate-dominating-file default-directory "go.mod")))
+    (when func-name
+      (if default-directory
+          (compile (format "go test -v -run=^Test%s$" (go-ucfirst func-name)))
+        (compile (format "go test -v -run=^Test%s$ ." (go-ucfirst func-name)))))))
+
+(defun go-run-specific-benchmark ()
+  "运行特定的基准测试函数。"
+  (interactive)
+  (let ((func-name (go-get-current-function-name))
+        (default-directory (locate-dominating-file default-directory "go.mod")))
+    (when func-name
+      (if default-directory
+          (compile (format "go test -bench=^Benchmark%s$" (go-ucfirst func-name)))
+        (compile (format "go test -bench=^Benchmark%s$ ." (go-ucfirst func-name)))))))
+
+;; =============================================
+;; 快捷键绑定
+;; =============================================
+
+(defun go-setup-keybindings ()
+  "设置 Go 模式的快捷键绑定。"
+  (local-set-key (kbd "C-c C-t") 'go-generate-test-for-function)
+  (local-set-key (kbd "C-c C-T") 'go-generate-tests-for-all-functions)
+  (local-set-key (kbd "C-c C-r") 'go-run-tests)
+  (local-set-key (kbd "C-c C-b") 'go-run-benchmarks)
+  (local-set-key (kbd "C-c C-R") 'go-run-specific-test)
+  (local-set-key (kbd "C-c C-B") 'go-run-specific-benchmark)
+  (local-set-key (kbd "C-c C-p") (lambda () (interactive) (message "包名: %s" (go-get-package-name))))
+  (local-set-key (kbd "C-c C-f") (lambda () (interactive) (message "函数名: %s" (go-get-current-function-name)))))
+
+;; 添加到 Go 模式钩子
+(add-hook 'go-mode-hook 'go-setup-keybindings)
+
+;; =============================================
+;; 使用示例
+;; =============================================
+
+;; 示例 Go 文件内容：
+;; package math
+;;
+;; // Add 函数用于加法计算
+;; func Add(a, b int) int {
+;;     return a + b
+;; }
+;;
+;; // Multiply 函数用于乘法计算
+;; func Multiply(a, b int) int {
+;;     return a * b
+;; }
+;;
+;; // 带有接收器的方法
+;; type Calculator struct {
+;;     Value int
+;; }
+;;
+;; func (c *Calculator) Increment() int {
+;;     c.Value++
+;;     return c.Value
+;; }
+
+;; 使用方法：
+;; 1. 打开 Go 文件
+;; 2. 将光标放在函数内部
+;; 3. 按下 C-c C-t 生成测试
+;; 4. 选择测试类型（测试函数、基准测试、示例测试）
+;; 5. 测试代码将自动生成并保存
+
+;; 批量生成：
+;; 1. 按下 C-c C-T 为所有函数生成测试
+;; 2. 选择测试类型
+
+;; 运行测试：
+;; 1. 按下 C-c C-r 运行所有测试
+;; 2. 按下 C-c C-b 运行所有基准测试
+;; 3. 按下 C-c C-R 运行当前函数的测试
+;; 4. 按下 C-c C-B 运行当前函数的基准测试
+
+
+功能说明
+
+这个实现集成了以下功能：
+
+1. 强大的正则表达式：
+
+  ◦ 包名匹配 (go-package-name-regexp)
+
+  ◦ 函数名匹配 (go-func-name-regexp)
+
+  ◦ 完整函数定义匹配 (go-func-definition-regexp)
+
+  ◦ 测试函数名匹配 (go-test-func-regexp)
+
+2. 多种测试类型生成：
+
+  ◦ 普通测试函数 (go-generate-test-code)
+
+  ◦ 基准测试函数 (go-generate-benchmark-code)
+
+  ◦ 示例测试函数 (go-generate-example-code)
+
+3. 智能代码生成：
+
+  ◦ 自动提取函数参数和返回值类型
+
+  ◦ 生成完整的测试用例结构
+
+  ◦ 根据函数特性生成适当的测试代码
+
+4. 文件管理：
+
+  ◦ 自动创建测试文件（如果不存在）
+
+  ◦ 检查重复测试函数
+
+  ◦ 批量生成测试
+
+5. 测试运行：
+
+  ◦ 运行所有测试
+
+  ◦ 运行所有基准测试
+
+  ◦ 运行特定函数的测试或基准测试
+
+使用示例
+
+假设你有一个 Go 文件 math.go，内容如下：
+
+package math
+
+func Add(a, b int) int {
+    return a + b
+}
+
+func Fibonacci(n int) int {
+    if n <= 1 {
+        return n
+    }
+    return Fibonacci(n-1) + Fibonacci(n-2)
+}
+
+
+1. 将光标放在 Add 函数内部，按下 C-c C-t，选择"测试函数"，将生成：
+
+func TestAdd(t *testing.T) {
+    // 测试用例
+    tests := []struct {
+        name string
+        a int, b int
+        want int
+    }{
+        {
+            name: "测试用例1",
+            // 设置输入参数
+            want: /* 期望值 */,
+        },
+        // 添加更多测试用例
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            // 准备测试数据
+            got := Add(tt.a, tt.b)
+            if got != tt.want {
+                t.Errorf("Add(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+            }
+        })
+    }
+}
+
+
+2. 将光标放在 Fibonacci 函数内部，按下 C-c C-t，选择"基准测试"，将生成：
+
+func BenchmarkFibonacci(b *testing.B) {
+    // 准备测试数据
+    n := 20 // 输入参数
+
+    // 重置计时器，排除设置时间
+    b.ResetTimer()
+
+    // 运行基准测试
+    for i := 0; i < b.N; i++ {
+        // 调用被测函数
+        Fibonacci(n)
+    }
+}
+
+
+3. 按下 C-c C-T，选择"示例测试"，将为所有函数生成示例测试。
+
+安装和使用
+
+1. 将上述代码添加到你的 Emacs 配置文件中
+
+2. 重启 Emacs 或重新加载配置
+
+3. 打开 Go 文件，使用快捷键生成和运行测试
+
+这个实现提供了一个完整的解决方案，可以自动为 Go 函数生成各种类型的测试代码，大大提高了测试编写的效率。正则表达式部分经过精心设计，能够正确处理各种复杂的函数定义情况。

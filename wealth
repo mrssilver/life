@@ -1,0 +1,1071 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"math/rand"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// 🏢 地产类型
+type EstateType int
+const (
+	ESTATE_HOTEL EstateType = iota
+	ESTATE_RESIDENTIAL
+	ESTATE_COMMERCIAL
+	ESTATE_INDUSTRIAL
+	ESTATE_LUXURY
+)
+
+// 💼 业务类型
+type BusinessType int
+const (
+	BUSINESS_RESTAURANT BusinessType = iota
+	BUSINESS_TECH
+	BUSINESS_REAL_ESTATE
+	BUSINESS_RETAIL
+	BUSINESS_MANUFACTURING
+)
+
+// 💔 离婚原因
+type DivorceReason int
+const (
+	DIVORCE_ASSETS DivorceReason = iota
+	DIVORCE_HEALTH
+	DIVORCE_AGE
+	DIVORCE_INFIDELITY
+	DIVORCE_PERSONALITY
+)
+
+// 🧠 AI性格类型
+const (
+	AI_CONSERVATIVE = "保守型"
+	AI_AGGRESSIVE   = "进取型"
+	AI_BALANCED     = "平衡型"
+	AI_FAMILY       = "家庭型"
+)
+
+// 🏢 地产结构
+type Estate struct {
+	ID            int
+	Name          string
+	Type          EstateType
+	BasePrice     float64
+	CurrentPrice  float64
+	Rent          float64
+	Owner         *Player
+	Tenant        *Player
+	Employees     int
+	Stars         int       // 酒店星级
+	OccupancyRate int       // 入住率
+	LastSold      bool      // 上回合是否出售
+}
+
+// 📈 股票结构
+type Stock struct {
+	ID          int
+	CompanyName string
+	Ticker      string
+	TotalShares int
+	Price       float64
+	Profit      float64     // 年度利润
+	Dividend    float64     // 每股分红
+	Owners      map[*Player]int
+}
+
+// 💍 婚姻结构
+type Marriage struct {
+	Husband     *Player
+	Wife        *Player
+	Date        string
+	Children    []*Player
+	IsActive    bool
+}
+
+// 💔 离婚结构
+type Divorce struct {
+	Reason      DivorceReason
+	Date        string
+	AssetSplit  float64 // 资产分割比例
+	Custody     string  // 子女抚养权
+	Alimony     float64 // 赡养费
+}
+
+// 🧑 玩家结构
+type Player struct {
+	ID            int
+	Name          string
+	Age           int
+	Cash          float64
+	Health        int
+	Intelligence  int
+	Charisma      int
+	Luck          int
+	Estates       []*Estate
+	Stocks        map[*Stock]int
+	Businesses    []*Business
+	Spouse        *Player
+	Marriage      *Marriage
+	Divorces      []*Divorce
+	IsAI          bool
+	AIPersonality string
+	Debt          float64
+	IsBankrupt    bool
+	NetWorth      float64
+}
+
+// 💼 业务结构
+type Business struct {
+	ID        int
+	Name      string
+	Type      BusinessType
+	Value     float64
+	Revenue   float64
+	Expenses  float64
+	Employees int
+	Owner     *Player
+}
+
+// 🎮 游戏状态
+type Game struct {
+	Players     []*Player
+	Year        int
+	Estates     []*Estate
+	Stocks      []*Stock
+	Businesses  []*Business
+	MarketTrend float64
+}
+
+// 🎯 初始化游戏
+func NewGame(numPlayers int) *Game {
+	rand.Seed(time.Now().UnixNano())
+	
+	game := &Game{
+		Year:       2023,
+		MarketTrend: 1.0,
+	}
+	
+	// 创建玩家
+	for i := 0; i < numPlayers; i++ {
+		player := &Player{
+			ID:           i + 1,
+			Name:         fmt.Sprintf("玩家%d", i+1),
+			Age:          18,
+			Cash:         100000,
+			Health:       100,
+			Intelligence: 70 + rand.Intn(30),
+			Charisma:     60 + rand.Intn(30),
+			Luck:         50 + rand.Intn(30),
+			Stocks:       make(map[*Stock]int),
+		}
+		
+		if i > 0 { // 第一个玩家是人类，其他是AI
+			player.IsAI = true
+			personalities := []string{AI_CONSERVATIVE, AI_AGGRESSIVE, AI_BALANCED, AI_FAMILY}
+			player.AIPersonality = personalities[rand.Intn(len(personalities))]
+		}
+		
+		game.Players = append(game.Players, player)
+	}
+	
+	// 创建地产
+	game.generateEstates()
+	
+	// 创建股票
+	game.generateStocks()
+	
+	// 创建业务
+	game.generateBusinesses()
+	
+	return game
+}
+
+// 🏢 生成地产
+func (g *Game) generateEstates() {
+	estateNames := []string{
+		"滨海度假酒店", "城市商务酒店", "豪华五星酒店", "精品设计酒店", "温泉度假村",
+		"市中心公寓", "海滨别墅", "商业中心", "工业园", "科技园区",
+	}
+	
+	for i := 0; i < 200; i++ {
+		estateType := EstateType(rand.Intn(5))
+		basePrice := 0.0
+		stars := 0
+		
+		switch estateType {
+		case ESTATE_HOTEL:
+			stars = 3 + rand.Intn(5) // 3-7星
+			basePrice = 500000 * float64(stars)
+		case ESTATE_RESIDENTIAL:
+			basePrice = 200000 + rand.Float64()*300000
+		case ESTATE_COMMERCIAL:
+			basePrice = 500000 + rand.Float64()*500000
+		case ESTATE_INDUSTRIAL:
+			basePrice = 300000 + rand.Float64()*400000
+		case ESTATE_LUXURY:
+			basePrice = 1000000 + rand.Float64()*2000000
+		}
+		
+		estate := &Estate{
+			ID:           i + 1,
+			Name:         fmt.Sprintf("%s %d", estateNames[i%len(estateNames)], i+1),
+			Type:         estateType,
+			BasePrice:    basePrice,
+			CurrentPrice: basePrice,
+			Rent:         basePrice * 0.05,
+			Stars:        stars,
+			OccupancyRate: 50 + rand.Intn(40), // 50-90%入住率
+		}
+		
+		g.Estates = append(g.Estates, estate)
+	}
+}
+
+// 📈 生成股票
+func (g *Game) generateStocks() {
+	companies := []struct {
+		Name   string
+		Ticker string
+		Value  float64
+	}{
+		{"科技巨头", "TECH", 1000000},
+		{"金融集团", "FINA", 800000},
+		{"能源公司", "ENER", 1200000},
+		{"医疗健康", "HEAL", 900000},
+		{"零售帝国", "RETL", 700000},
+	}
+	
+	for i, c := range companies {
+		stock := &Stock{
+			ID:          i + 1,
+			CompanyName: c.Name,
+			Ticker:      c.Ticker,
+			TotalShares: 1000,
+			Price:       c.Value / 1000,
+			Owners:      make(map[*Player]int),
+		}
+		g.Stocks = append(g.Stocks, stock)
+	}
+}
+
+// 💼 生成业务
+func (g *Game) generateBusinesses() {
+	businessNames := []string{
+		"高端餐厅", "科技创业公司", "房地产中介", "连锁零售店", "制造工厂",
+	}
+	
+	for i := 0; i < 50; i++ {
+		businessType := BusinessType(rand.Intn(5))
+		value := 0.0
+		
+		switch businessType {
+		case BUSINESS_RESTAURANT:
+			value = 50000 + rand.Float64()*50000
+		case BUSINESS_TECH:
+			value = 200000 + rand.Float64()*300000
+		case BUSINESS_REAL_ESTATE:
+			value = 300000 + rand.Float64()*200000
+		case BUSINESS_RETAIL:
+			value = 100000 + rand.Float64()*100000
+		case BUSINESS_MANUFACTURING:
+			value = 400000 + rand.Float64()*300000
+		}
+		
+		business := &Business{
+			ID:        i + 1,
+			Name:      fmt.Sprintf("%s %d", businessNames[i%len(businessNames)], i+1),
+			Type:      businessType,
+			Value:     value,
+			Revenue:   value * 0.2,
+			Expenses:  value * 0.1,
+			Employees: 10 + rand.Intn(40),
+		}
+		g.Businesses = append(g.Businesses, business)
+	}
+}
+
+// 💍 求婚
+func (g *Game) proposeMarriage(proposer, target *Player) {
+	if proposer.Spouse != nil || target.Spouse != nil {
+		fmt.Println("一方已有配偶")
+		return
+	}
+	
+	if proposer.Age < 25 || target.Age < 25 {
+		fmt.Println("年龄不足25岁")
+		return
+	}
+	
+	// 计算求婚成功率
+	successChance := float64(proposer.Charisma+target.Charisma) / 200.0
+	if rand.Float64() < successChance {
+		// 创建婚姻
+		marriage := &Marriage{
+			Husband:  proposer,
+			Wife:     target,
+			Date:     fmt.Sprintf("%d年", g.Year),
+			IsActive: true,
+		}
+		
+		proposer.Spouse = target
+		target.Spouse = proposer
+		proposer.Marriage = marriage
+		target.Marriage = marriage
+		
+		fmt.Printf("💍 %s 和 %s 结婚了!\n", proposer.Name, target.Name)
+	} else {
+		fmt.Printf("💔 %s 拒绝了 %s 的求婚\n", target.Name, proposer.Name)
+	}
+}
+
+// 💔 离婚
+func (g *Game) divorce(couple *Marriage, reason DivorceReason) {
+	if !couple.IsActive {
+		fmt.Println("婚姻已结束")
+		return
+	}
+	
+	// 资产分割
+	assetSplit := 0.5 // 默认50%分割比例
+	
+	// 根据离婚原因调整分割比例
+	switch reason {
+	case DIVORCE_INFIDELITY:
+		// 不忠方获得较少资产
+		if rand.Intn(2) == 0 {
+			assetSplit = 0.3 // 丈夫获得30%
+		} else {
+			assetSplit = 0.7 // 妻子获得70%
+		}
+	case DIVORCE_ASSETS:
+		assetSplit = 0.5
+	case DIVORCE_HEALTH:
+		assetSplit = 0.6 // 健康问题方获得更多
+	case DIVORCE_AGE:
+		assetSplit = 0.5
+	case DIVORCE_PERSONALITY:
+		assetSplit = 0.5
+	}
+	
+	// 分割资产
+	g.splitAssets(couple.Husband, couple.Wife, assetSplit)
+	
+	// 子女抚养权
+	custody := "共同抚养"
+	if len(couple.Children) > 0 {
+		if rand.Intn(100) < 70 {
+			custody = "母亲"
+		} else {
+			custody = "父亲"
+		}
+	}
+	
+	// 赡养费
+	alimony := 0.0
+	if couple.Husband.NetWorth > couple.Wife.NetWorth {
+		alimony = couple.Husband.NetWorth * 0.1
+	} else if couple.Wife.NetWorth > couple.Husband.NetWorth {
+		alimony = couple.Wife.NetWorth * 0.1
+	}
+	
+	// 创建离婚记录
+	divorce := Divorce{
+		Reason:     reason,
+		Date:       fmt.Sprintf("%d年", g.Year),
+		AssetSplit: assetSplit,
+		Custody:    custody,
+		Alimony:    alimony,
+	}
+	
+	couple.Husband.Divorces = append(couple.Husband.Divorces, divorce)
+	couple.Wife.Divorces = append(couple.Wife.Divorces, divorce)
+	
+	// 结束婚姻
+	couple.IsActive = false
+	couple.Husband.Spouse = nil
+	couple.Wife.Spouse = nil
+	couple.Husband.Marriage = nil
+	couple.Wife.Marriage = nil
+	
+	fmt.Printf("💔 %s 和 %s 离婚了! 原因: %s\n", 
+		couple.Husband.Name, couple.Wife.Name, reasonToString(reason))
+	fmt.Printf("资产分割: %.0f%% | 子女抚养权: %s | 赡养费: $%.2f/年\n", 
+		assetSplit*100, custody, alimony)
+}
+
+// 💰 分割资产
+func (g *Game) splitAssets(husband, wife *Player, splitRatio float64) {
+	// 分割现金
+	totalCash := husband.Cash + wife.Cash
+	husband.Cash = totalCash * splitRatio
+	wife.Cash = totalCash * (1 - splitRatio)
+	
+	// 分割地产
+	g.splitEstates(husband, wife, splitRatio)
+	
+	// 分割股票
+	g.splitStocks(husband, wife, splitRatio)
+	
+	// 分割业务
+	g.splitBusinesses(husband, wife, splitRatio)
+}
+
+// 🏢 分割地产
+func (g *Game) splitEstates(husband, wife *Player, splitRatio float64) {
+	// 丈夫的地产
+	for i := len(husband.Estates) - 1; i >= 0; i-- {
+		estate := husband.Estates[i]
+		if rand.Float64() > splitRatio {
+			// 转移给妻子
+			wife.Estates = append(wife.Estates, estate)
+			estate.Owner = wife
+			husband.Estates = append(husband.Estates[:i], husband.Estates[i+1:]...)
+		}
+	}
+	
+	// 妻子的地产
+	for i := len(wife.Estates) - 1; i >= 0; i-- {
+		estate := wife.Estates[i]
+		if rand.Float64() < splitRatio {
+			// 转移给丈夫
+			husband.Estates = append(husband.Estates, estate)
+			estate.Owner = husband
+			wife.Estates = append(wife.Estates[:i], wife.Estates[i+1:]...)
+		}
+	}
+}
+
+// 📈 分割股票
+func (g *Game) splitStocks(husband, wife *Player, splitRatio float64) {
+	// 丈夫的股票
+	for stock, shares := range husband.Stocks {
+		sharesToTransfer := int(float64(shares) * (1 - splitRatio))
+		if sharesToTransfer > 0 {
+			wife.Stocks[stock] += sharesToTransfer
+			husband.Stocks[stock] -= sharesToTransfer
+			if husband.Stocks[stock] == 0 {
+				delete(husband.Stocks, stock)
+			}
+		}
+	}
+	
+	// 妻子的股票
+	for stock, shares := range wife.Stocks {
+		sharesToTransfer := int(float64(shares) * splitRatio)
+		if sharesToTransfer > 0 {
+			husband.Stocks[stock] += sharesToTransfer
+			wife.Stocks[stock] -= sharesToTransfer
+			if wife.Stocks[stock] == 0 {
+				delete(wife.Stocks, stock)
+			}
+		}
+	}
+}
+
+// 💼 分割业务
+func (g *Game) splitBusinesses(husband, wife *Player, splitRatio float64) {
+	// 丈夫的业务
+	for i := len(husband.Businesses) - 1; i >= 0; i-- {
+		business := husband.Businesses[i]
+		if rand.Float64() > splitRatio {
+			// 转移给妻子
+			wife.Businesses = append(wife.Businesses, business)
+			business.Owner = wife
+			husband.Businesses = append(husband.Businesses[:i], husband.Businesses[i+1:]...)
+		}
+	}
+	
+	// 妻子的业务
+	for i := len(wife.Businesses) - 1; i >= 0; i-- {
+		business := wife.Businesses[i]
+		if rand.Float64() < splitRatio {
+			// 转移给丈夫
+			husband.Businesses = append(husband.Businesses, business)
+			business.Owner = husband
+			wife.Businesses = append(wife.Businesses[:i], wife.Businesses[i+1:]...)
+		}
+	}
+}
+
+// 🏢 购买地产
+func (g *Game) buyEstate(player *Player, estate *Estate) {
+	if player.Cash < estate.CurrentPrice {
+		fmt.Printf("资金不足! 需要 $%.2f, 只有 $%.2f\n", estate.CurrentPrice, player.Cash)
+		return
+	}
+	
+	player.Cash -= estate.CurrentPrice
+	estate.Owner = player
+	player.Estates = append(player.Estates, estate)
+	estate.LastSold = true
+	
+	fmt.Printf("✅ %s 购买了 %s\n", player.Name, estate.Name)
+}
+
+// 📈 购买股票
+func (g *Game) buyStock(player *Player, stock *Stock, shares int) {
+	cost := float64(shares) * stock.Price
+	if player.Cash < cost {
+		fmt.Printf("资金不足! 需要 $%.2f, 只有 $%.2f\n", cost, player.Cash)
+		return
+	}
+	
+	if shares > stock.TotalShares {
+		fmt.Printf("只有 %d 股可购买\n", stock.TotalShares)
+		return
+	}
+	
+	player.Cash -= cost
+	player.Stocks[stock] += shares
+	stock.TotalShares -= shares
+	
+	fmt.Printf("✅ %s 购买了 %d股 %s\n", player.Name, shares, stock.CompanyName)
+}
+
+// 💼 购买业务
+func (g *Game) buyBusiness(player *Player, business *Business) {
+	if player.Cash < business.Value {
+		fmt.Printf("资金不足! 需要 $%.2f, 只有 $%.2f\n", business.Value, player.Cash)
+		return
+	}
+	
+	player.Cash -= business.Value
+	business.Owner = player
+	player.Businesses = append(player.Businesses, business)
+	
+	fmt.Printf("✅ %s 收购了 %s\n", player.Name, business.Name)
+}
+
+// 📅 结束本年
+func (g *Game) endYear() {
+	g.Year++
+	
+	// 更新市场趋势
+	g.updateMarketTrend()
+	
+	// 所有玩家年龄增加
+	for _, player := range g.Players {
+		player.Age++
+		
+		// 更新净资产
+		player.NetWorth = g.calculateNetWorth(player)
+		
+		// 处理地产
+		g.processEstates(player)
+		
+		// 处理股票
+		g.processStocks(player)
+		
+		// 处理业务
+		g.processBusinesses(player)
+		
+		// 处理婚姻
+		g.processMarriages(player)
+		
+		// 检查破产
+		if player.Cash < 0 && player.NetWorth < 0 {
+			player.IsBankrupt = true
+			fmt.Printf("💸 %s 破产了!\n", player.Name)
+		}
+	}
+}
+
+// 📈 更新市场趋势
+func (g *Game) updateMarketTrend() {
+	// 随机市场波动 (0.8 - 1.2)
+	g.MarketTrend = 0.8 + rand.Float64()*0.4
+	
+	// 更新地产价格
+	for _, estate := range g.Estates {
+		if !estate.LastSold {
+			// 未出售地产价格下降5%
+			estate.CurrentPrice *= 0.95
+		}
+		estate.CurrentPrice *= g.MarketTrend
+		estate.Rent = estate.CurrentPrice * 0.05
+		estate.LastSold = false // 重置出售状态
+	}
+	
+	// 更新股票价格
+	for _, stock := range g.Stocks {
+		// 随机利润 (-10% 到 +20%)
+		profitRange := stock.Price * 0.3
+		stock.Profit = -stock.Price*0.1 + rand.Float64()*profitRange
+		
+		// 分红为利润的50%
+		stock.Dividend = stock.Profit * 0.5 / float64(stock.TotalShares)
+		
+		// 股价波动
+		change := -0.1 + rand.Float64()*0.3 // -10% 到 +20%
+		stock.Price *= 1 + change
+	}
+}
+
+// 🧮 计算净资产
+func (g *Game) calculateNetWorth(player *Player) float64 {
+	netWorth := player.Cash
+	
+	// 地产价值
+	for _, estate := range player.Estates {
+		netWorth += estate.CurrentPrice
+	}
+	
+	// 股票价值
+	for stock, shares := range player.Stocks {
+		netWorth += float64(shares) * stock.Price
+	}
+	
+	// 业务价值
+	for _, business := range player.Businesses {
+		netWorth += business.Value
+	}
+	
+	// 减去债务
+	netWorth -= player.Debt
+	
+	return netWorth
+}
+
+// 🏢 处理地产
+func (g *Game) processEstates(player *Player) {
+	// 地产收入
+	for _, estate := range player.Estates {
+		if estate.Tenant != nil {
+			// 收取租金
+			player.Cash += estate.Rent
+			fmt.Printf("🏢 %s 收取 %s 租金: $%.2f\n", player.Name, estate.Name, estate.Rent)
+		}
+	}
+	
+	// 地产税
+	estateTax := float64(len(player.Estates)) * 100
+	if estateTax > 0 {
+		player.Cash -= estateTax
+		fmt.Printf("🏢 %s 缴纳地产税: $%.2f\n", player.Name, estateTax)
+	}
+}
+
+// 📈 处理股票
+func (g *Game) processStocks(player *Player) {
+	// 股票分红
+	for stock, shares := range player.Stocks {
+		dividend := stock.Dividend * float64(shares)
+		player.Cash += dividend
+		fmt.Printf("📈 %s 收到 %s 分红: $%.2f\n", player.Name, stock.CompanyName, dividend)
+	}
+}
+
+// 💼 处理业务
+func (g *Game) processBusinesses(player *Player) {
+	// 业务利润
+	for _, business := range player.Businesses {
+		profit := business.Revenue - business.Expenses
+		player.Cash += profit
+		fmt.Printf("💼 %s 的 %s 盈利: $%.2f\n", player.Name, business.Name, profit)
+	}
+}
+
+// 💍 处理婚姻
+func (g *Game) processMarriages(player *Player) {
+	if player.Marriage != nil && player.Marriage.IsActive {
+		// 生育子女
+		if player.Age < 40 && rand.Intn(100) < 20 {
+			child := &Player{
+				ID:    len(g.Players) + 1,
+				Name:  fmt.Sprintf("%s的孩子", player.Name),
+				Age:   0,
+			}
+			player.Marriage.Children = append(player.Marriage.Children, child)
+			fmt.Printf("👶 %s 和 %s 有了一个孩子!\n", player.Name, player.Spouse.Name)
+		}
+		
+		// 婚姻稳定性
+		stability := float64(player.Charisma+player.Spouse.Charisma) / 200.0
+		if rand.Float64() > stability {
+			// 离婚风险
+			reasons := []DivorceReason{
+				DIVORCE_ASSETS,
+				DIVORCE_HEALTH,
+				DIVORCE_AGE,
+				DIVORCE_INFIDELITY,
+				DIVORCE_PERSONALITY,
+			}
+			g.divorce(player.Marriage, reasons[rand.Intn(len(reasons))])
+		}
+	}
+}
+
+// 🎮 主游戏循环
+func (g *Game) Run() {
+	reader := bufio.NewReader(os.Stdin)
+	
+	fmt.Println("🏦 欢迎来到财富人生游戏!")
+	fmt.Println("你将体验经商、投资、婚姻和财富管理的人生旅程")
+	
+	// 设置人类玩家名称
+	fmt.Print("请输入你的名字: ")
+	name, _ := reader.ReadString('\n')
+	g.Players[0].Name = strings.TrimSpace(name)
+	
+	for {
+		fmt.Printf("\n======= 年份: %d =======\n", g.Year)
+		
+		// 玩家回合
+		for _, player := range g.Players {
+			if player.IsBankrupt {
+				fmt.Printf("\n🚫 %s 已破产，跳过回合\n", player.Name)
+				continue
+			}
+			
+			fmt.Printf("\n===== %s 的回合 (年龄: %d) =====\n", player.Name, player.Age)
+			fmt.Printf("💵 现金: $%.2f | 💰 净资产: $%.2f\n", player.Cash, player.NetWorth)
+			
+			if player.IsAI {
+				g.aiTurn(player)
+			} else {
+				g.playerTurn(player)
+			}
+		}
+		
+		// 结束本年
+		g.endYear()
+		
+		// 检查是否继续游戏
+		fmt.Print("\n继续下一年? (y/n): ")
+		input, _ := reader.ReadString('\n')
+		if strings.TrimSpace(input) != "y" {
+			fmt.Println("游戏结束!")
+			break
+		}
+	}
+	
+	// 显示最终排名
+	g.displayRankings()
+}
+
+// 🤖 AI玩家回合
+func (g *Game) aiTurn(player *Player) {
+	fmt.Printf("🤖 %s 的回合 (性格: %s)\n", player.Name, player.AIPersonality)
+	
+	// 根据AI性格决定行动
+	switch player.AIPersonality {
+	case AI_CONSERVATIVE:
+		g.conservativeAIActions(player)
+	case AI_AGGRESSIVE:
+		g.aggressiveAIActions(player)
+	case AI_BALANCED:
+		g.balancedAIActions(player)
+	case AI_FAMILY:
+		g.familyAIActions(player)
+	}
+	
+	fmt.Println("🤖 结束回合")
+}
+
+// 🧑 人类玩家回合
+func (g *Game) playerTurn(player *Player) {
+	reader := bufio.NewReader(os.Stdin)
+	
+	for {
+		fmt.Println("\n🎮 请选择行动:")
+		fmt.Println("1. 购买地产")
+		fmt.Println("2. 购买股票")
+		fmt.Println("3. 收购业务")
+		fmt.Println("4. 求婚")
+		fmt.Println("5. 管理资产")
+		fmt.Println("6. 查看状态")
+		fmt.Println("7. 结束回合")
+		
+		fmt.Print("请输入选项: ")
+		input, _ := reader.ReadString('\n')
+		choice, err := strconv.Atoi(strings.TrimSpace(input))
+		if err != nil {
+			fmt.Println("无效输入")
+			continue
+		}
+		
+		switch choice {
+		case 1:
+			g.buyEstateMenu(player)
+		case 2:
+			g.buyStockMenu(player)
+		case 3:
+			g.buyBusinessMenu(player)
+		case 4:
+			g.proposeMenu(player)
+		case 5:
+			g.manageAssets(player)
+		case 6:
+			g.displayStatus(player)
+		case 7:
+			fmt.Println("结束回合")
+			return
+		default:
+			fmt.Println("无效选项")
+		}
+	}
+}
+
+// 🏢 购买地产菜单
+func (g *Game) buyEstateMenu(player *Player) {
+	reader := bufio.NewReader(os.Stdin)
+	
+	// 显示可购买地产
+	fmt.Println("\n🏢 可购买的地产:")
+	for i, estate := range g.Estates {
+		if estate.Owner == nil {
+			fmt.Printf("%d. %s | 类型: %s | 价格: $%.2f | 租金: $%.2f\n", 
+				i+1, estate.Name, estateTypeToString(estate.Type), estate.CurrentPrice, estate.Rent)
+		}
+	}
+	
+	fmt.Print("选择要购买的地产编号 (0取消): ")
+	input, _ := reader.ReadString('\n')
+	index, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || index < 1 || index > len(g.Estates) {
+		fmt.Println("取消购买")
+		return
+	}
+	
+	estate := g.Estates[index-1]
+	if estate.Owner != nil {
+		fmt.Println("该地产已被购买")
+		return
+	}
+	
+	g.buyEstate(player, estate)
+}
+
+// 📈 购买股票菜单
+func (g *Game) buyStockMenu(player *Player) {
+	reader := bufio.NewReader(os.Stdin)
+	
+	// 显示可购买股票
+	fmt.Println("\n📈 可购买的股票:")
+	for i, stock := range g.Stocks {
+		fmt.Printf("%d. %s (%s) | 价格: $%.2f | 分红: $%.2f\n", 
+			i+1, stock.CompanyName, stock.Ticker, stock.Price, stock.Dividend)
+	}
+	
+	fmt.Print("选择要购买的股票编号 (0取消): ")
+	input, _ := reader.ReadString('\n')
+	index, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || index < 1 || index > len(g.Stocks) {
+		fmt.Println("取消购买")
+		return
+	}
+	
+	stock := g.Stocks[index-1]
+	
+	fmt.Print("购买多少股? ")
+	input, _ = reader.ReadString('\n')
+	shares, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || shares <= 0 {
+		fmt.Println("无效数量")
+		return
+	}
+	
+	g.buyStock(player, stock, shares)
+}
+
+// 💼 购买业务菜单
+func (g *Game) buyBusinessMenu(player *Player) {
+	reader := bufio.NewReader(os.Stdin)
+	
+	// 显示可购买业务
+	fmt.Println("\n💼 可收购的业务:")
+	for i, business := range g.Businesses {
+		if business.Owner == nil {
+			profit := business.Revenue - business.Expenses
+			fmt.Printf("%d. %s | 类型: %s | 价值: $%.2f | 利润: $%.2f\n", 
+				i+1, business.Name, businessTypeToString(business.Type), business.Value, profit)
+		}
+	}
+	
+	fmt.Print("选择要收购的业务编号 (0取消): ")
+	input, _ := reader.ReadString('\n')
+	index, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || index < 1 || index > len(g.Businesses) {
+		fmt.Println("取消收购")
+		return
+	}
+	
+	business := g.Businesses[index-1]
+	if business.Owner != nil {
+		fmt.Println("该业务已被收购")
+		return
+	}
+	
+	g.buyBusiness(player, business)
+}
+
+// 💍 求婚菜单
+func (g *Game) proposeMenu(player *Player) {
+	reader := bufio.NewReader(os.Stdin)
+	
+	if player.Spouse != nil {
+		fmt.Println("你已有配偶")
+		return
+	}
+	
+	// 显示可求婚对象
+	fmt.Println("\n💍 可求婚对象:")
+	availablePlayers := []*Player{}
+	for _, p := range g.Players {
+		if p != player && p.Spouse == nil && p.Age >= 25 {
+			availablePlayers = append(availablePlayers, p)
+			fmt.Printf("%d. %s (年龄: %d)\n", len(availablePlayers), p.Name, p.Age)
+		}
+	}
+	
+	if len(availablePlayers) == 0 {
+		fmt.Println("没有合适的求婚对象")
+		return
+	}
+	
+	fmt.Print("选择求婚对象编号 (0取消): ")
+	input, _ := reader.ReadString('\n')
+	index, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || index < 1 || index > len(availablePlayers) {
+		fmt.Println("取消求婚")
+		return
+	}
+	
+	target := availablePlayers[index-1]
+	g.proposeMarriage(player, target)
+}
+
+// 📊 显示状态
+func (g *Game) displayStatus(player *Player) {
+	fmt.Printf("\n📊 %s 的状态\n", player.Name)
+	fmt.Printf("年龄: %d | 现金: $%.2f | 净资产: $%.2f\n", player.Age, player.Cash, player.NetWorth)
+	
+	if player.Spouse != nil {
+		fmt.Printf("💍 配偶: %s (年龄: %d)\n", player.Spouse.Name, player.Spouse.Age)
+		if len(player.Marriage.Children) > 0 {
+			fmt.Printf("👨‍👩‍👧‍👦 子女: %d 人\n", len(player.Marriage.Children))
+		}
+	}
+	
+	// 地产
+	if len(player.Estates) > 0 {
+		fmt.Println("\n🏢 地产:")
+		for _, estate := range player.Estates {
+			fmt.Printf("- %s | 类型: %s | 价值: $%.2f | 租金: $%.2f\n", 
+				estate.Name, estateTypeToString(estate.Type), estate.CurrentPrice, estate.Rent)
+		}
+	}
+	
+	// 股票
+	if len(player.Stocks) > 0 {
+		fmt.Println("\n📈 股票:")
+		for stock, shares := range player.Stocks {
+			value := float64(shares) * stock.Price
+			fmt.Printf("- %s (%s) | 数量: %d | 价值: $%.2f | 分红: $%.2f\n", 
+				stock.CompanyName, stock.Ticker, shares, value, stock.Dividend)
+		}
+	}
+	
+	// 业务
+	if len(player.Businesses) > 0 {
+		fmt.Println("\n💼 业务:")
+		for _, business := range player.Businesses {
+			profit := business.Revenue - business.Expenses
+			fmt.Printf("- %s | 类型: %s | 价值: $%.2f | 利润: $%.2f\n", 
+				business.Name, businessTypeToString(business.Type), business.Value, profit)
+		}
+	}
+}
+
+// 🏆 显示最终排名
+func (g *Game) displayRankings() {
+	// 按净资产排序
+	sort.Slice(g.Players, func(i, j int) bool {
+		return g.Players[i].NetWorth > g.Players[j].NetWorth
+	})
+	
+	fmt.Println("\n🏆 最终排名:")
+	for i, player := range g.Players {
+		status := "正常"
+		if player.IsBankrupt {
+			status = "破产"
+		}
+		fmt.Printf("%d. %s | 净资产: $%.2f | 状态: %s\n", 
+			i+1, player.Name, player.NetWorth, status)
+	}
+}
+
+// 🏢 地产类型转字符串
+func estateTypeToString(estateType EstateType) string {
+	switch estateType {
+	case ESTATE_HOTEL:
+		return "酒店"
+	case ESTATE_RESIDENTIAL:
+		return "住宅"
+	case ESTATE_COMMERCIAL:
+		return "商业"
+	case ESTATE_INDUSTRIAL:
+		return "工业"
+	case ESTATE_LUXURY:
+		return "豪华"
+	default:
+		return "未知"
+	}
+}
+
+// 💼 业务类型转字符串
+func businessTypeToString(businessType BusinessType) string {
+	switch businessType {
+	case BUSINESS_RESTAURANT:
+		return "餐饮"
+	case BUSINESS_TECH:
+		return "科技"
+	case BUSINESS_REAL_ESTATE:
+		return "房地产"
+	case BUSINESS_RETAIL:
+		return "零售"
+	case BUSINESS_MANUFACTURING:
+		return "制造"
+	default:
+		return "未知"
+	}
+}
+
+// 💔 离婚原因转字符串
+func reasonToString(reason DivorceReason) string {
+	switch reason {
+	case DIVORCE_ASSETS:
+		return "资产纠纷"
+	case DIVORCE_HEALTH:
+		return "健康问题"
+	case DIVORCE_AGE:
+		return "年龄差距"
+	case DIVORCE_INFIDELITY:
+		return "不忠行为"
+	case DIVORCE_PERSONALITY:
+		return "性格不合"
+	default:
+		return "其他原因"
+	}
+}
+
+// 🎮 主函数
+func main() {
+	reader := bufio.NewReader(os.Stdin)
+	
+	fmt.Println("🏦 财富人生游戏")
+	fmt.Print("请输入玩家数量 (2-6): ")
+	input, _ := reader.ReadString('\n')
+	numPlayers, err := strconv.Atoi(strings.TrimSpace(input))
+	if err != nil || numPlayers < 2 || numPlayers > 6 {
+		numPlayers = 4
+		fmt.Println("使用默认玩家数量: 4")
+	}
+	
+	game := NewGame(numPlayers)
+	game.Run()
+}

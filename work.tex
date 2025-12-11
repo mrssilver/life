@@ -1,0 +1,191 @@
+\documentclass[17pt]{article}
+% Allow the usage of UTF-8 characters
+\usepackage[utf8]{inputenc}
+% Allow the usage of graphics (.png, .jpg)
+%\usepackage{graphicx}
+
+\usepackage{geometry}
+\geometry{top=17pt, 
+bottom=72pt, 
+left=20pt, 
+right=70pt,
+%textwidth=250pt, 
+%textheight=600pt,
+paperwidth=300pt,
+paperheight=200pt
+
+}
+
+\usepackage{xcolor}
+\definecolor{gold}{HTML}{999900}
+
+\definecolor{milk}{HTML}{f0f0a9}
+
+\definecolor{fnt}{HTML}{110000}
+
+%\pagecolor{milk}
+\color{fnt}
+\usepackage{verbatim}
+
+\usepackage{listings}
+
+\lstset{
+    extendedchars=true,
+    literate={中}{{\textcolor{red}{中}}}1
+}
+%chinese
+\lstdefinestyle{go}{
+    language=Go,                % 语言设置为 Go
+    basicstyle=\ttfamily\small, % 基本字体样式
+    keywordstyle=\color{red},  % 关键字颜色
+    commentstyle=\color{green}, % 注释颜色
+    stringstyle=\color{red},    % 字符串颜色
+    showstringspaces=false,     % 不显示字符串中的空格
+    numbers=left,               % 行号在左侧
+    numberstyle=\tiny\color{yellow}, % 行号样式
+    stepnumber=1,               % 每行显示行号
+    tabsize=4,                  % 缩进宽度
+    breaklines=true,            % 自动换行
+    backgroundcolor=\color{orange}, % 背景色（可选）
+    frame=single,               % 边框样式
+    rulecolor=\color{yellow},    % 边框颜色
+    captionpos=b,               % 标题位置（bottom）
+}
+%define keywords add
+\lstdefinelanguage{Go}{
+    keywords=[1]{package, import, func, var, const, struct, interface},
+    keywords=[2]{if, else, for, range, switch, case, default, defer, go, select},
+    keywords=[3]{int, string, bool, float64, error, nil, true, false},
+    sensitive=true,
+    morecomment=[l]{//},       % 单行注释
+    morecomment=[s]{/*}{*/},  % 多行注释
+    morestring=[b]{"},        % 字符串
+    morestring=[b]{`},        % 原始字符串（raw string）
+}
+
+% Start the document
+\begin{document}
+
+% Create a new 1st level heading
+\section{Main Heading}
+
+\begin{verbatim}
+#include <stdio.h>
+int main() {
+    printf("Hello, World!\n");
+    return 0;
+}
+\end{verbatim}
+
+%\verbatiminput{code.py}
+%read code.py
+\verb |\# to #|
+
+\begin{comment}
+这部分内容不会在最终文档中显示，
+用于临时注释大段文本。verbatim function 
+\end{comment}
+
+Go 的 \lstinline[language=Go]|fmt.Println("Hello")| 是打印函数。
+
+\begin{lstlisting}[style=go]
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, World!")
+}
+\end{lstlisting}
+
+%\lstinputlisting[style=go]{hello.go} %read file
+
+\begin{lstlisting}[language=Python]
+def factorial(n):
+    if n == 0:
+        return 1
+    else:
+        return n * factorial(n-1)
+\end{lstlisting}
+
+\textcolor{gold}{
+Here's a line-by-line explanation of the weather-process-data function:
+}
+(defun weather-process-data (city data)
+  "处理并存储天气数据"
+  ;; Function definition: weather-process-data takes two parameters:
+  ;; - city: the name of the city being processed
+  ;; - data: the weather data from API response
+  
+  (condition-case err
+  ;; Begin error handling: if any error occurs in the following code,
+  ;; the error will be caught and handled by the error section at the end
+  
+      (let* ((city-info (gethash city weather-city-data))
+      ;; Retrieve existing weather data for this city from the hash table
+      
+             (existing-hourly (or (plist-get city-info :hourly) '()))
+             ;; Extract existing hourly data, or use empty list if none exists
+             
+             (new-hourly (mapcar jing'weather--create-plist 
+                                (alist-get 'list data)))
+             ;; Convert new API data to property lists using weather--create-plist
+             ;; The API data is found in the 'list field of the response
+             
+             (all-hourly (append existing-hourly new-hourly))
+             ;; Combine existing and new hourly data
+             
+             (filtered-hourly (weather--filter-by-time-range all-hourly 1 5)))
+             ;; Filter data to include only past 1 day and next 5 days
+             
+        ;; Sort the filtered hourly data by timestamp (dt field)
+        (setq filtered-hourly (cl-sort filtered-hourly \#'< :key (lambda (x) (plist-get x :dt))))
+        
+        ;; Remove duplicate entries based on timestamp
+        (setq filtered-hourly (cl-remove-duplicates filtered-hourly 
+                                                   :test (lambda (a b) 
+                                                          (= (plist-get a :dt) 
+                                                             (plist-get b :dt))))))
+        
+        ;; Group the filtered data by date
+        (let ((daily-data (weather--group-by-date filtered-hourly)))
+          ;; Store the processed data in the hash table
+          (puthash city `(:city ,city 
+                         :hourly ,filtered-hourly 
+                         :daily ,daily-data
+                         :last-update ,(current-time))
+                   weather-city-data)))
+    ;; End of main processing code
+    
+    (error 
+     ;; Error handling section: executed if any error occurred above
+     ;; Display a message about the processing failure but don't store the error
+     (message "%s: 数据处理失败 - %s" city (error-message-string err)))))
+     ;; Format: "City: 数据处理失败 - Error message"
+
+
+This function:
+
+1. Takes a city name and API response data as input
+
+2. Uses error handling to catch any processing issues
+
+3. Combines existing data with new API data
+
+4. Filters the data to a specific time range (past 1 day, next 5 days)
+
+5. Sorts and removes duplicates from the data
+
+6. Groups the hourly data by date
+
+7. Stores the processed data in a hash table for later use
+
+8. Shows an error message if processing fails, but doesn't store the error for display in the final report
+
+The function ensures that only valid, properly formatted weather data gets stored and displayed, while any processing errors are simply logged as messages without affecting the overall report.
+
+% Uncomment the following two lines if you want to have a bibliography
+%\bibliographystyle{apalike}
+%\bibliography{document}
+
+\end{document}

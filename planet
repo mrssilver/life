@@ -1,0 +1,685 @@
+//2d earth mars moon
+//3d 投影转换
+package main
+import (
+	"fmt"
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
+	"math"
+	"time"
+)
+
+// 天文常数和轨道参数结构体
+type OrbitalParams struct {
+	SemiMajorAxis  float64 // 半长轴 (AU)
+	Eccentricity   float64 // 偏心率
+	Inclination    float64 // 轨道倾角 (度)
+	Period         float64 // 轨道周期 (天)
+	Color          string  // 颜色
+	Radius         float64 // 半径 (km)
+}
+
+// 定义天体结构体
+type CelestialBody struct {
+	Name   string
+	Params OrbitalParams
+}
+
+func main() {
+	start := time.Now() // 记录程序开始时间
+	
+	// 天体数据 (基于NASA JPL近似值)
+	bodies := []CelestialBody{
+		{
+			Name: "Sun", // 太阳
+			Params: OrbitalParams{
+				SemiMajorAxis: 0,      // 太阳位于中心
+				Eccentricity:  0,      // 无偏心率
+				Period:        0,      // 无轨道周期
+				Color:         "#FFD700", // 金色
+				Radius:        696340, // 太阳半径(km)
+			},
+		},
+		{
+			Name: "Mercury", // 水星
+			Params: OrbitalParams{
+				SemiMajorAxis: 0.387, // 半长轴(AU)
+				Eccentricity:  0.206, // 偏心率
+				Inclination:   7.0,   // 轨道倾角(度)
+				Period:        88.0,  // 轨道周期(天)
+				Color:         "#A9A9A9", // 灰色
+				Radius:        2439,  // 水星半径(km)
+			},
+		},
+		{
+			Name: "Venus", // 金星
+			Params: OrbitalParams{
+				SemiMajorAxis: 0.723,
+				Eccentricity:  0.007,
+				Inclination:   3.4,
+				Period:        224.7,
+				Color:         "#FFA500", // 橙色
+				Radius:        6051,
+			},
+		},
+		{
+			Name: "Earth", // 地球
+			Params: OrbitalParams{
+				SemiMajorAxis: 1.000,
+				Eccentricity:  0.017,
+				Inclination:   0.0,
+				Period:        365.25,
+				Color:         "#1E90FF", // 蓝色
+				Radius:        6371,
+			},
+		},
+		{
+			Name: "Mars", // 火星
+			Params: OrbitalParams{
+				SemiMajorAxis: 1.524,
+				Eccentricity:  0.093,
+				Inclination:   1.9,
+				Period:        687.0,
+				Color:         "#FF4500", // 红橙色
+				Radius:        3389,
+			},
+		},
+	}
+
+	// 创建绘图对象
+	p := plot.New()
+	p.Title.Text = "优化的太阳系模型" // 设置标题
+	p.Title.TextStyle.Font.Size = 18 // 设置标题字体大小
+	p.X.Label.Text = "X (AU)" // X轴标签
+	p.Y.Label.Text = "Y (AU)" // Y轴标签
+	
+	// 动态设置坐标轴范围
+	maxOrbit := 2.0 // 最大轨道半径
+	p.X.Min = -maxOrbit // X轴最小值
+	p.X.Max = maxOrbit  // X轴最大值
+	p.Y.Min = -maxOrbit // Y轴最小值
+	p.Y.Max = maxOrbit  // Y轴最大值
+	
+	// 添加网格
+	grid := plotter.NewGrid()
+	grid.Horizontal.Color = draw.Color{R: 50, G: 50, B: 50, A: 100} // 水平网格线颜色
+	grid.Vertical.Color = draw.Color{R: 50, G: 50, B: 50, A: 100}   // 垂直网格线颜色
+	p.Add(grid) // 将网格添加到绘图
+
+	// 绘制天体轨道
+	drawOptimizedOrbits(p, bodies)
+	// 绘制天体当前位置
+	drawCurrentPositions(p, bodies)
+	
+	// 添加信息面板
+	addInfoPanel(p, bodies, start)
+	
+	// 保存图像
+	filename := fmt.Sprintf("optimized_solar_system_%d.png", time.Now().Unix())
+	if err := p.Save(16*vg.Inch, 16*vg.Inch, filename); err != nil {
+		panic(err) // 如果保存失败，抛出错误
+	}
+	
+	fmt.Printf("优化完成! 图像保存为: %s\n", filename)
+	fmt.Printf("处理时间: %v\n", time.Since(start)) // 输出处理时间
+}
+
+// 绘制优化的轨道
+func drawOptimizedOrbits(p *plot.Plot, bodies []CelestialBody) {
+	for i, body := range bodies {
+		if body.Name == "Sun" {
+			continue // 跳过太阳，太阳没有轨道
+		}
+		
+		// 计算轨道点数：根据轨道周期动态确定
+		points := int(body.Params.Period / 10)
+		if points < 36 { // 最小点数
+			points = 36
+		}
+		if points > 360 { // 最大点数限制
+			points = 360
+		}
+		
+		// 创建轨道点数组
+		orbit := make(plotter.XYs, points)
+		for j := 0; j < points; j++ {
+			angle := float64(j) * 2 * math.Pi / float64(points) // 计算角度
+			// 计算椭圆轨道上的位置
+			x, y := calculateEllipticalPosition(body.Params, angle)
+			orbit[j].X = x
+			orbit[j].Y = y
+		}
+		
+		// 创建轨道线
+		line, err := plotter.NewLine(orbit)
+		if err != nil {
+			continue // 如果创建失败，跳过
+		}
+		
+		// 设置轨道线样式
+		line.Color = parseColor(body.Params.Color) // 设置颜色
+		line.Width = vg.Points(1.0) // 设置线宽
+		if body.Name == "Earth" {
+			line.Width = vg.Points(1.5) // 地球轨道加粗
+		}
+		p.Add(line) // 将轨道线添加到绘图
+		
+		// 每4个天体添加一个图例项以避免拥挤
+		if i%4 == 0 {
+			p.Legend.Add(body.Name+"轨道", line)
+		}
+	}
+}
+
+// 绘制当前位置
+func drawCurrentPositions(p *plot.Plot, bodies []CelestialBody) {
+	now := time.Now() // 获取当前时间
+	
+	for _, body := range bodies {
+		if body.Name == "Sun" {
+			// 绘制太阳
+			sun := plotter.XYs{{0, 0}} // 太阳位置在原点
+			scatter, _ := plotter.NewScatter(sun) // 创建散点图
+			scatter.GlyphStyle.Color = parseColor(body.Params.Color) // 设置颜色
+			scatter.GlyphStyle.Radius = vg.Points(12) // 设置大小
+			scatter.GlyphStyle.Shape = draw.CircleGlyph{} // 设置为圆形
+			p.Add(scatter) // 添加到绘图
+			p.Legend.Add(body.Name, scatter) // 添加到图例
+			continue
+		}
+		
+		// 计算自历元以来的天数
+		daysSinceEpoch := daysSince(now, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+		// 计算当前角度
+		angle := 2 * math.Pi * daysSinceEpoch / body.Params.Period
+		
+		// 计算当前位置
+		x, y := calculateEllipticalPosition(body.Params, angle)
+		
+		// 创建天体位置散点
+		pos := plotter.XYs{{x, y}}
+		scatter, _ := plotter.NewScatter(pos)
+		scatter.GlyphStyle.Color = parseColor(body.Params.Color)
+		
+		// 根据半径比例设置大小
+		size := math.Log(body.Params.Radius/1000) * 2
+		if size < 3 { // 最小大小限制
+			size = 3
+		}
+		scatter.GlyphStyle.Radius = vg.Points(size)
+		scatter.GlyphStyle.Shape = draw.CircleGlyph{}
+		
+		p.Add(scatter) // 添加到绘图
+		p.Legend.Add(body.Name, scatter) // 添加到图例
+		
+		// 添加天体标签
+		addBodyLabel(p, body.Name, x, y, size)
+	}
+}
+
+// 计算椭圆轨道位置
+func calculateEllipticalPosition(params OrbitalParams, angle float64) (x, y float64) {
+	// 考虑偏心率的真实位置计算
+	r := params.SemiMajorAxis * (1 - params.Eccentricity*params.Eccentricity) / 
+		(1 + params.Eccentricity*math.Cos(angle))
+	
+	// 考虑轨道倾角
+	inclination := params.Inclination * math.Pi / 180 // 转换为弧度
+	x = r * math.Cos(angle) // X坐标
+	y = r * math.Sin(angle) * math.Cos(inclination) // Y坐标，考虑倾角
+	
+	return x, y
+}
+
+// 添加天体标签
+func addBodyLabel(p *plot.Plot, name string, x, y, size float64) {
+	// 创建标签位置
+	label := plotter.XYLabel{
+		XY: plotter.XY{X: x, Y: y + 0.1 + size/50}, // 在行星上方添加标签
+		Label: name,
+	}
+	
+	// 创建标签对象
+	labels, err := plotter.NewLabels(plotter.XYLabels{
+		XYs:    []plotter.XY{label.XY},
+		Labels: []string{label.Label},
+	})
+	if err != nil {
+		return // 如果创建失败，返回
+	}
+	
+	// 设置标签样式
+	labels.TextStyle.Color = draw.Color{R: 255, G: 255, B: 255, A: 255} // 白色
+	labels.TextStyle.Font.Size = vg.Points(10) // 字体大小
+	labels.YOffset = vg.Points(10) // Y偏移
+	p.Add(labels) // 添加到绘图
+}
+
+// 添加信息面板
+func addInfoPanel(p *plot.Plot, bodies []CelestialBody, start time.Time) {
+	now := time.Now() // 当前时间
+	
+	// 创建信息文本
+	infoText := []string{
+		fmt.Sprintf("太阳系模型 - %s", now.Format("2006-01-02 15:04:05")), // 当前时间
+		"使用精确椭圆轨道参数", // 模型说明
+		fmt.Sprintf("数据源: NASA JPL 近似值"), // 数据来源
+		fmt.Sprintf("渲染时间: %.2fms", float64(time.Since(start).Nanoseconds())/1e6), // 渲染时间
+		"", // 空行
+	}
+	
+	// 添加天体信息
+	for i, body := range bodies {
+		if i >= 5 { // 限制显示数量
+			break
+		}
+		// 添加天体轨道参数
+		infoText = append(infoText, 
+			fmt.Sprintf("%s: a=%.3fAU, e=%.3f", body.Name, 
+				body.Params.SemiMajorAxis, body.Params.Eccentricity))
+	}
+	
+	// 创建标签位置数组
+	xyLabels := plotter.XYLabels{
+		XYs:    make([]plotter.XY, len(infoText)),
+		Labels: infoText,
+	}
+	
+	// 设置每个文本的位置
+	for i := range infoText {
+		xyLabels.XYs[i] = plotter.XY{X: -1.9, Y: 1.7 - float64(i)*0.08}
+	}
+	
+	// 创建标签对象
+	labels, err := plotter.NewLabels(xyLabels)
+	if err != nil {
+		return // 如果创建失败，返回
+	}
+	
+	// 设置标签样式
+	labels.TextStyle.Color = draw.Color{R: 200, G: 200, B: 200, A: 255} // 浅灰色
+	labels.TextStyle.Font.Size = vg.Points(11) // 字体大小
+	p.Add(labels) // 添加到绘图
+}
+
+// 解析HEX颜色为draw.Color
+func parseColor(hex string) draw.Color {
+	if len(hex) != 7 || hex[0] != '#' { // 检查格式
+		return draw.Color{R: 255, G: 255, B: 255, A: 255} // 默认白色
+	}
+	
+	// 解析HEX字符
+	parseHex := func(b byte) uint8 {
+		if b >= '0' && b <= '9' {
+			return uint8(b - '0')
+		}
+		if b >= 'a' && b <= 'f' {
+			return uint8(b-'a') + 10
+		}
+		if b >= 'A' && b <= 'F' {
+			return uint8(b-'A') + 10
+		}
+		return 0
+	}
+	
+	// 解析RGB值
+	r := parseHex(hex[1])<<4 | parseHex(hex[2])
+	g := parseHex(hex[3])<<4 | parseHex(hex[4])
+	b := parseHex(hex[5])<<4 | parseHex(hex[6])
+	
+	return draw.Color{R: r, G: g, B: b, A: 255}
+}
+
+// 计算两个时间之间的天数差
+func daysSince(t1, t2 time.Time) float64 {
+	return t1.Sub(t2).Hours() / 24
+}
+
+3d
+package main
+
+import (
+	"fmt"
+	"gonum.org/v1/gonum/spatial/r3"
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
+	"math"
+	"time"
+)
+
+// 3D 天体位置结构
+type SpacePosition struct {
+	X, Y, Z float64
+}
+// 添加命令行参数支持 交互view
+func parseFlags() (rotX, rotY, rotZ float64) {
+    flag.Float64Var(&rotX, "rotx", 30, "X轴旋转角度")
+    flag.Float64Var(&rotY, "roty", 15, "Y轴旋转角度")
+    flag.Float64Var(&rotZ, "rotz", 0, "Z轴旋转角度")
+    flag.Parse()
+    return rotX * math.Pi / 180, rotY * math.Pi / 180, rotZ * math.Pi / 180
+}
+
+// 轨道参数
+type OrbitalParams struct {
+	SemiMajorAxis  float64 // 半长轴 (AU)
+	Eccentricity   float64 // 偏心率
+	Inclination    float64 // 轨道倾角 (度)
+	Period         float64 // 轨道周期 (天)
+	Color          string  // 颜色
+	Radius         float64 // 半径 (km)
+}
+
+// 天体结构
+type CelestialBody struct {
+	Name   string
+	Params OrbitalParams
+}
+
+// 3D 点转换器
+type PointConverter struct {
+	Scale    float64
+	Rotation r3.Vec
+}
+
+func main() {
+	start := time.Now()
+	
+	// 天体数据 (NASA JPL 近似值)
+	bodies := []CelestialBody{
+		{
+			Name: "Sun",
+			Params: OrbitalParams{
+				SemiMajorAxis: 0,
+				Eccentricity:  0,
+				Inclination:   0,
+				Period:        0,
+				Color:         "#FFD700",
+				Radius:        696340,
+			},
+		},
+		{
+			Name: "Earth",
+			Params: OrbitalParams{
+				SemiMajorAxis: 1.000,
+				Eccentricity:  0.017,
+				Inclination:   0.0,
+				Period:        365.25,
+				Color:         "#1E90FF",
+				Radius:        6371,
+			},
+		},
+		{
+			Name: "Mars",
+			Params: OrbitalParams{
+				SemiMajorAxis: 1.524,
+				Eccentricity:  0.093,
+				Inclination:   1.85,
+				Period:        687.0,
+				Color:         "#FF4500",
+				Radius:        3389,
+			},
+		},
+	}
+
+	// 创建 3D 点转换器
+	converter := PointConverter{
+		Scale: 1.0,
+		Rotation: r3.Vec{
+			X: 30 * math.Pi / 180, // 30度旋转
+			Y: 15 * math.Pi / 180, // 15度旋转
+			Z: 0,
+		},
+	}
+
+	// 创建绘图
+	p := plot.New()
+	p.Title.Text = "3D 太阳系模型"
+	p.Title.TextStyle.Font.Size = 18
+	p.X.Label.Text = "X (AU)"
+	p.Y.Label.Text = "Y (AU)"
+	
+	// 设置坐标轴范围
+	maxOrbit := 2.0
+	p.X.Min = -maxOrbit
+	p.X.Max = maxOrbit
+	p.Y.Min = -maxOrbit
+	p.Y.Max = maxOrbit
+	
+	// 添加网格
+	grid := plotter.NewGrid()
+	grid.Horizontal.Color = draw.Color{R: 50, G: 50, B: 50, A: 100}
+	grid.Vertical.Color = draw.Color{R: 50, G: 50, B: 50, A: 100}
+	p.Add(grid)
+
+	// 绘制天体轨道和位置
+	draw3DOrbits(p, bodies, converter)
+	draw3DPositions(p, bodies, converter)
+	
+	// 添加信息面板
+	add3DInfoPanel(p, bodies, start)
+	
+	// 保存图像
+	filename := fmt.Sprintf("3d_solar_system_%d.png", time.Now().Unix())
+	if err := p.Save(16*vg.Inch, 16*vg.Inch, filename); err != nil {
+		panic(err)
+	}
+	
+	fmt.Printf("3D 太阳系模型创建完成! 图像保存为: %s\n", filename)
+	fmt.Printf("处理时间: %v\n", time.Since(start))
+}
+
+// 绘制 3D 轨道
+func draw3DOrbits(p *plot.Plot, bodies []CelestialBody, converter PointConverter) {
+	for _, body := range bodies {
+		if body.Name == "Sun" {
+			continue
+		}
+		
+		points := 360
+		orbit := make(plotter.XYs, points)
+		
+		for i := 0; i < points; i++ {
+			angle := float64(i) * 2 * math.Pi / float64(points)
+			pos3D := calculate3DPosition(body.Params, angle)
+			pos2D := converter.Project(pos3D)
+			orbit[i].X = pos2D.X
+			orbit[i].Y = pos2D.Y
+		}
+		
+		line, err := plotter.NewLine(orbit)
+		if err != nil {
+			continue
+		}
+		
+		line.Color = parseColor(body.Params.Color)
+		line.Width = vg.Points(1.0)
+		if body.Name == "Earth" {
+			line.Width = vg.Points(1.5)
+		}
+		p.Add(line)
+		p.Legend.Add(body.Name+"轨道", line)
+	}
+}
+
+// 绘制 3D 位置
+func draw3DPositions(p *plot.Plot, bodies []CelestialBody, converter PointConverter) {
+	now := time.Now()
+	
+	for _, body := range bodies {
+		if body.Name == "Sun" {
+			sun := plotter.XYs{{0, 0}}
+			scatter, _ := plotter.NewScatter(sun)
+			scatter.GlyphStyle.Color = parseColor(body.Params.Color)
+			scatter.GlyphStyle.Radius = vg.Points(12)
+			scatter.GlyphStyle.Shape = draw.CircleGlyph{}
+			p.Add(scatter)
+			p.Legend.Add(body.Name, scatter)
+			continue
+		}
+		
+		daysSinceEpoch := daysSince(now, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+		angle := 2 * math.Pi * daysSinceEpoch / body.Params.Period
+		
+		pos3D := calculate3DPosition(body.Params, angle)
+		pos2D := converter.Project(pos3D)
+		
+		pos := plotter.XYs{{pos2D.X, pos2D.Y}}
+		scatter, _ := plotter.NewScatter(pos)
+		scatter.GlyphStyle.Color = parseColor(body.Params.Color)
+		
+		size := math.Log(body.Params.Radius/1000) * 2
+		if size < 3 {
+			size = 3
+		}
+		scatter.GlyphStyle.Radius = vg.Points(size)
+		scatter.GlyphStyle.Shape = draw.CircleGlyph{}
+		
+		p.Add(scatter)
+		p.Legend.Add(body.Name, scatter)
+		
+		add3DBodyLabel(p, body.Name, pos2D.X, pos2D.Y, size)
+	}
+}
+
+// 计算 3D 位置
+func calculate3DPosition(params OrbitalParams, angle float64) SpacePosition {
+	// 计算轨道平面内的位置
+	r := params.SemiMajorAxis * (1 - params.Eccentricity*params.Eccentricity) / 
+		(1 + params.Eccentricity*math.Cos(angle))
+	
+	x := r * math.Cos(angle)
+	y := r * math.Sin(angle)
+	
+	// 应用轨道倾角
+	inclination := params.Inclination * math.Pi / 180
+	z := y * math.Sin(inclination)
+	y = y * math.Cos(inclination)
+	
+	return SpacePosition{X: x, Y: y, Z: z}
+}
+
+// 投影 3D 到 2D
+func (c *PointConverter) Project(pos SpacePosition) SpacePosition {
+	// 应用旋转
+	rotated := c.rotate(pos)
+	
+	// 等距投影
+	x := rotated.X - rotated.Y
+	y := (rotated.X + rotated.Y)/2 - rotated.Z
+	
+	return SpacePosition{X: x * c.Scale, Y: y * c.Scale}
+}
+
+// 应用 3D 旋转
+func (c *PointConverter) rotate(pos SpacePosition) SpacePosition {
+	// 绕 X 轴旋转
+	y1 := pos.Y*math.Cos(c.Rotation.X) - pos.Z*math.Sin(c.Rotation.X)
+	z1 := pos.Y*math.Sin(c.Rotation.X) + pos.Z*math.Cos(c.Rotation.X)
+	
+	// 绕 Y 轴旋转
+	x2 := pos.X*math.Cos(c.Rotation.Y) + z1*math.Sin(c.Rotation.Y)
+	z2 := -pos.X*math.Sin(c.Rotation.Y) + z1*math.Cos(c.Rotation.Y)
+	
+	// 绕 Z 轴旋转
+	x3 := x2*math.Cos(c.Rotation.Z) - y1*math.Sin(c.Rotation.Z)
+	y3 := x2*math.Sin(c.Rotation.Z) + y1*math.Cos(c.Rotation.Z)
+	
+	return SpacePosition{X: x3, Y: y3, Z: z2}
+}
+
+// 添加 3D 天体标签
+func add3DBodyLabel(p *plot.Plot, name string, x, y, size float64) {
+	label := plotter.XYLabel{
+		XY: plotter.XY{X: x, Y: y + 0.1 + size/50},
+		Label: name,
+	}
+	
+	labels, err := plotter.NewLabels(plotter.XYLabels{
+		XYs:    []plotter.XY{label.XY},
+		Labels: []string{label.Label},
+	})
+	if err != nil {
+		return
+	}
+	
+	labels.TextStyle.Color = draw.Color{R: 255, G: 255, B: 255, A: 255}
+	labels.TextStyle.Font.Size = vg.Points(10)
+	labels.YOffset = vg.Points(10)
+	p.Add(labels)
+}
+
+// 添加 3D 信息面板
+func add3DInfoPanel(p *plot.Plot, bodies []CelestialBody, start time.Time) {
+	now := time.Now()
+	
+	infoText := []string{
+		fmt.Sprintf("3D 太阳系模型 - %s", now.Format("2006-01-02 15:04:05")),
+		"使用等距投影展示三维轨道",
+		fmt.Sprintf("数据源: NASA JPL 近似值"),
+		fmt.Sprintf("渲染时间: %.2fms", float64(time.Since(start).Nanoseconds())/1e6),
+		"",
+	}
+	
+	for i, body := range bodies {
+		if i >= 3 {
+			break
+		}
+		infoText = append(infoText, 
+			fmt.Sprintf("%s: a=%.3fAU, i=%.2f°", body.Name, 
+				body.Params.SemiMajorAxis, body.Params.Inclination))
+	}
+	
+	xyLabels := plotter.XYLabels{
+		XYs:    make([]plotter.XY, len(infoText)),
+		Labels: infoText,
+	}
+	
+	for i := range infoText {
+		xyLabels.XYs[i] = plotter.XY{X: -1.9, Y: 1.7 - float64(i)*0.08}
+	}
+	
+	labels, err := plotter.NewLabels(xyLabels)
+	if err != nil {
+		return
+	}
+	
+	labels.TextStyle.Color = draw.Color{R: 200, G: 200, B: 200, A: 255}
+	labels.TextStyle.Font.Size = vg.Points(11)
+	p.Add(labels)
+}
+
+// 解析颜色
+func parseColor(hex string) draw.Color {
+	if len(hex) != 7 || hex[0] != '#' {
+		return draw.Color{R: 255, G: 255, B: 255, A: 255}
+	}
+	
+	parseHex := func(b byte) uint8 {
+		switch {
+		case b >= '0' && b <= '9':
+			return b - '0'
+		case b >= 'a' && b <= 'f':
+			return b - 'a' + 10
+		case b >= 'A' && b <= 'F':
+			return b - 'A' + 10
+		default:
+			return 0
+		}
+	}
+	
+	r := parseHex(hex[1])<<4 | parseHex(hex[2])
+	g := parseHex(hex[3])<<4 | parseHex(hex[4])
+	b := parseHex(hex[5])<<4 | parseHex(hex[6])
+	
+	return draw.Color{R: r, G: g, B: b, A: 255}
+}
+
+// 计算天数差
+func daysSince(t1, t2 time.Time) float64 {
+	return t1.Sub(t2).Hours() / 24
+}

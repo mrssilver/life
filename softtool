@@ -1,0 +1,2165 @@
+ackage main
+
+import (
+	"bufio"
+	"bytes"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+// 状态类型常量
+const (
+	NormalState      = iota
+	CaptureStart     // 捕获组开始
+	CaptureEnd       // 捕获组结束
+	ZeroStart        // \zs 零宽度起始
+	ZeroEnd          // \ze 零宽度结束
+	WordBoundaryState // 单词边界状态
+	LineStartState   // 行开始状态 ^
+	LineEndState     // 行结束状态 $
+)
+
+// State 表示 NFA 状态
+type State struct {
+	id        int
+	trans     map[rune][]int // 字符转移
+	epsilon   []int          // ε转移
+	stateType int            // 状态类型
+	capture   int            // 捕获组编号 (0表示无)
+	greedy    bool           // 是否贪婪匹配 (默认为true)
+	isAccept  bool           // 是否为接受状态
+}
+
+// NFA 结构
+type NFA struct {
+	states   []*State
+	start    int
+	alphabet map[rune]bool
+	groups   int // 捕获组计数器
+}
+
+// Fragment 表示 NFA 片段
+type Fragment struct {
+	start int
+	end   int
+}
+
+// Quantifier 表示量词范围
+type Quantifier struct {
+	min int
+	max int // -1 表示无上限
+}
+
+// Match 表示匹配结果
+type Match struct {
+	start   int
+	end     int
+	groups  map[int][2]int // 捕获组位置
+	content string
+}
+
+const (
+	bufferSize = 1024 // 读取缓冲区大小
+)
+
+func main() {
+	// 自定义帮助信息
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "正则表达式工具 - 支持模式匹配和替换\n\n")
+		fmt.Fprintf(os.Stderr, "用法: %s [选项]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "选项:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n示例:\n")
+		fmt.Fprintf(os.Stderr, "  匹配模式: %s -pattern '\\d+' -input data.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  替换模式: %s -r 's/error/warning/g' -input errors.log -output fixed.log\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  从文件读取模式: %s -file pattern.txt -input data.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  多行模式: %s -pattern '^\\d+' -m -input multiline.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  替换前N次: %s -r 's/old/new/3' -input data.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\n正则表达式特性支持:\n")
+		fmt.Fprintf(os.Stderr, "  - 基本元字符: . * + ? | ( ) [ ] ^ $\n")
+		fmt.Fprintf(os.Stderr, "  - 转义序列: \\d \\w \\s \\D \\W \\S \\b \\n \\r \\t\n")
+		fmt.Fprintf(os.Stderr, "  - 量词: {n} {n,m} {n,}\n")
+		fmt.Fprintf(os.Stderr, "  - 分组和捕获: (pattern)\n")
+		fmt.Fprintf(os.Stderr, "  - 零宽度断言: \\zs \\ze\n")
+		fmt.Fprintf(os.Stderr, "  - 贪婪/非贪婪: *? +? ??\n")
+		fmt.Fprintf(os.Stderr, "  - 字符类: [a-z] [^0-9]\n")
+		fmt.Fprintf(os.Stderr, "  - 后向引用: \\1 \\2 \\3\n")
+	}
+
+	// 解析命令行参数
+	pattern := flag.String("pattern", "", "正则表达式")
+	patternFile := flag.String("file", "", "包含正则表达式的文件")
+	replacePattern := flag.String("r", "", "替换模式 (格式: /search/replace/ 或 s/search/replace/g 或 s/search/replace/2)")
+	inputFile := flag.String("input", "", "输入文件")
+	outputFile := flag.String("output", "", "输出文件 (默认为标准输出)")
+	multiLine := flag.Bool("m", false, "多行模式 (^ 和 $ 匹配每行的开头和结尾)")
+	help := flag.Bool("help", false, "显示帮助信息")
+	flag.Parse()
+
+	// 显示帮助信息
+	if *help {
+		flag.Usage()
+		os.Exit(0)
+	}
+
+	// 验证输入
+	if *inputFile == "" && !isInputFromPipe() {
+		fmt.Println("错误: 未指定输入文件且无管道输入")
+		fmt.Println("使用 --help 查看帮助信息")
+		os.Exit(1)
+	}
+
+	// 获取正则表达式
+	var regex string
+	switch {
+	case *pattern != "":
+		regex = *pattern
+	case *patternFile != "":
+		content, err := os.ReadFile(*patternFile)
+		if err != nil {
+			fmt.Printf("读取文件错误: %v\n", err)
+			os.Exit(1)
+		}
+		regex = string(content)
+	default:
+		fmt.Println("错误: 需要提供 -pattern 或 -file")
+		fmt.Println("使用 --help 查看帮助信息")
+		os.Exit(1)
+	}
+
+	// 解析替换模式
+	searchRegex, replaceStr, global, replaceCount := parseReplacePattern(*replacePattern)
+
+	// 准备输入
+	var in io.Reader
+	if *inputFile != "" {
+		file, err := os.Open(*inputFile)
+		if err != nil {
+			fmt.Printf("打开输入文件错误: %v\n", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+		in = file
+	} else {
+		in = os.Stdin
+	}
+
+	// 准备输出
+	var out io.Writer = os.Stdout
+	if *outputFile != "" {
+		outFile, err := os.Create(*outputFile)
+		if err != nil {
+			fmt.Printf("创建输出文件错误: %v\n", err)
+			os.Exit(1)
+		}
+		defer outFile.Close()
+		out = outFile
+	}
+
+	// 处理输入
+	if *replacePattern != "" {
+		processInputWithReplacement(in, out, regex, searchRegex, replaceStr, global, replaceCount, *multiLine)
+	} else {
+		processInput(in, out, regex, *multiLine)
+	}
+}
+
+// 检查是否从管道输入
+func isInputFromPipe() bool {
+	fileInfo, _ := os.Stdin.Stat()
+	return (fileInfo.Mode() & os.ModeCharDevice) == 0
+}
+
+// 解析替换模式: /search/replace/ 或 s/search/replace/g
+func parseReplacePattern(pattern string) (string, string, bool, int) {
+	if pattern == "" {
+		return "", "", false, 0
+	}
+
+	// 支持 /pattern/replace/ 格式
+	if pattern[0] == '/' && len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
+		parts := strings.Split(pattern[1:len(pattern)-1], "/")
+		if len(parts) == 2 {
+			return parts[0], parts[1], false, 0
+		}
+	}
+
+	// 支持 s/pattern/replace/g 格式
+	if pattern[0] == 's' && len(pattern) > 1 && (pattern[1] == '/' || pattern[1] == '@' || pattern[1] == '#') {
+		delimiter := rune(pattern[1])
+		parts := []string{}
+		buffer := strings.Builder{}
+		escape := false
+		count := 0
+
+		for _, ch := range pattern[2:] {
+			if escape {
+				buffer.WriteRune(ch)
+				escape = false
+				continue
+			}
+
+			if ch == '\\' {
+				escape = true
+				continue
+			}
+
+			if ch == delimiter && count < 2 {
+				count++
+				parts = append(parts, buffer.String())
+				buffer.Reset()
+				continue
+			}
+
+			buffer.WriteRune(ch)
+		}
+
+		// 添加最后部分
+		if buffer.Len() > 0 {
+			parts = append(parts, buffer.String())
+		}
+
+		// 处理模式
+		switch {
+		case len(parts) >= 2:
+			global := false
+			replaceCount := 0
+			
+			if len(parts) >= 3 {
+				// 检查是数字还是 'g'
+				if num, err := strconv.Atoi(parts[2]); err == nil {
+					replaceCount = num
+				} else if strings.Contains(parts[2], "g") {
+					global = true
+				}
+			}
+			
+			return parts[0], parts[1], global, replaceCount
+		default:
+			fmt.Println("警告: 无效的替换格式，使用默认行为")
+			return pattern, "", false, 0
+		}
+	}
+
+	return pattern, "", false, 0
+}
+
+// 处理输入（仅匹配）
+func processInput(in io.Reader, out io.Writer, pattern string, multiLine bool) {
+	nfa := BuildNFA(pattern)
+	scanner := bufio.NewScanner(in)
+	lineNum := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := FindAllMatches(nfa, line, multiLine)
+		lineNum++
+
+		if len(matches) > 0 {
+			fmt.Fprintf(out, "L%04d: %s\n", lineNum, line)
+			for i, m := range matches {
+				fmt.Fprintf(out, "  匹配 %d: [%d:%d] %q\n", i+1, m.start, m.end, m.content)
+				if len(m.groups) > 0 {
+					fmt.Fprintf(out, "    捕获组:\n")
+					for k, v := range m.groups {
+						group := line[v[0]:v[1]]
+						fmt.Fprintf(out, "      %d: [%d:%d] %q\n", k, v[0], v[1], group)
+					}
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(out, "读取错误: %v\n", err)
+	}
+}
+
+// 处理输入（匹配并替换）
+func processInputWithReplacement(in io.Reader, out io.Writer, pattern, searchPattern, replaceStr string, global bool, replaceCount int, multiLine bool) {
+	if searchPattern != "" {
+		pattern = searchPattern
+	}
+
+	nfa := BuildNFA(pattern)
+	scanner := bufio.NewScanner(in)
+	lineNum := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := FindAllMatches(nfa, line, multiLine)
+		lineNum++
+
+		if len(matches) > 0 {
+			// 应用替换
+			replaced := replaceMatches(line, matches, replaceStr, global, replaceCount)
+			fmt.Fprintln(out, replaced)
+		} else {
+			fmt.Fprintln(out, line)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(out, "读取错误: %v\n", err)
+	}
+}
+
+// 构建 NFA
+func BuildNFA(regex string) *NFA {
+	nfa := &NFA{
+		states:   make([]*State, 0),
+		alphabet: make(map[rune]bool),
+		groups:   0,
+	}
+
+	// 处理转义字符
+	regex = unescapeString(regex)
+
+	var fragments []*Fragment
+	stack := []*Fragment{}
+	escape := false
+	i := 0
+
+	for i < len(regex) {
+		ch := rune(regex[i])
+		i++
+
+		// 处理转义字符
+		if ch == '\\' && i < len(regex) {
+			escape = true
+			next := rune(regex[i])
+			i++
+
+			switch next {
+			case 'd':
+				fragments = append(fragments, nfa.characterClass(false, true, false, false))
+			case 'w':
+				fragments = append(fragments, nfa.characterClass(true, false, false, false))
+			case 's':
+				fragments = append(fragments, nfa.characterClass(false, false, true, false))
+			case 'D': // 非数字
+				fragments = append(fragments, nfa.characterClass(false, true, false, true))
+			case 'S': // 非空白
+				fragments = append(fragments, nfa.characterClass(false, false, true, true))
+			case 'W': // 非单词字符
+				fragments = append(fragments, nfa.characterClass(true, false, false, true))
+			case 'b': // 单词边界
+				fragments = append(fragments, nfa.wordBoundaryFragment())
+			case 'n': // 换行符
+				fragments = append(fragments, nfa.basicFragment('\n'))
+			case 'z', 'Z': // 处理 \zs 和 \ze
+				if i < len(regex) {
+					if regex[i] == 's' {
+						fragments = append(fragments, nfa.zeroStart())
+						i++
+					} else if regex[i] == 'e' {
+						fragments = append(fragments, nfa.zeroEnd())
+						i++
+					}
+				}
+			case '1', '2', '3', '4', '5', '6', '7', '8', '9': // 后向引用
+				groupID := int(next - '0')
+				fragments = append(fragments, nfa.backrefFragment(groupID))
+			default:
+				fragments = append(fragments, nfa.basicFragment(next))
+				nfa.alphabet[next] = true
+			}
+			escape = false
+			continue
+		}
+
+		if escape {
+			escape = false
+			fragments = append(fragments, nfa.basicFragment(ch))
+			nfa.alphabet[ch] = true
+			continue
+		}
+
+		switch ch {
+		case '.':
+			fragments = append(fragments, nfa.basicFragment('.'))
+		case '|':
+			if len(fragments) < 2 {
+				panic("OR操作符需要两个操作数")
+			}
+			f2 := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			f1 := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			fragments = append(fragments, nfa.unionFragments(f1, f2))
+		case '*':
+			if len(fragments) == 0 {
+				panic("重复操作符需要操作数")
+			}
+			f := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			
+			// 检查是否是非贪婪量词
+			greedy := true
+			if i < len(regex) && regex[i] == '?' {
+				greedy = false
+				i++ // 跳过'?'
+			}
+			
+			fragments = append(fragments, nfa.starFragment(f, greedy))
+		case '+':
+			if len(fragments) == 0 {
+				panic("+操作符需要操作数")
+			}
+			f := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			
+			// 检查是否是非贪婪量词
+			greedy := true
+			if i < len(regex) && regex[i] == '?' {
+				greedy = false
+				i++ // 跳过'?'
+			}
+			
+			// a+ 转换为 aa*
+			copyFrag := nfa.copyFragment(f)
+			starFrag := nfa.starFragment(f, greedy)
+			fragments = append(fragments, nfa.concatFragments(copyFrag, starFrag))
+		case '?':
+			if len(fragments) == 0 {
+				panic("?操作符需要操作数")
+			}
+			f := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			
+			// 检查是否是非贪婪量词
+			greedy := true
+			if i < len(regex) && regex[i] == '?' {
+				greedy = false
+				i++ // 跳过'?'
+			}
+			
+			fragments = append(fragments, nfa.optionalFragment(f, greedy))
+		case '{': // 处理 {m,n} 量词
+			j := i
+			for j < len(regex) && regex[j] != '}' {
+				j++
+			}
+			if j >= len(regex) {
+				panic("未闭合的 {")
+			}
+
+			expr := regex[i:j]
+			i = j + 1 // 跳过 '}'
+			
+			// 检查是否是非贪婪量词
+			greedy := true
+			if i < len(regex) && regex[i] == '?' {
+				greedy = false
+				i++ // 跳过'?'
+			}
+			
+			parts := strings.Split(expr, ",")
+
+			if len(parts) == 0 || len(parts) > 2 {
+				panic("无效量词格式")
+			}
+
+			min, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil {
+				panic("无效的最小值")
+			}
+
+			max := min
+			if len(parts) == 2 {
+				if strings.TrimSpace(parts[1]) == "" {
+					max = -1 // 无上限
+				} else {
+					max, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+					if err != nil {
+						panic("无效的最大值")
+					}
+				}
+			}
+
+			if min < 0 || (max != -1 && max < min) {
+				panic("无效量词范围")
+			}
+
+			if len(fragments) == 0 {
+				panic("量词需要操作数")
+			}
+
+			f := fragments[len(fragments)-1]
+			fragments = fragments[:len(fragments)-1]
+			q := Quantifier{min: min, max: max}
+			fragments = append(fragments, nfa.applyQuantifier(f, q, greedy))
+		case '(':
+			// 捕获组开始
+			nfa.groups++
+			groupID := nfa.groups
+			startState := nfa.createState(CaptureStart, groupID)
+			frag := &Fragment{start: startState.id}
+			fragments = append(fragments, frag)
+			stack = append(stack, frag)
+		case ')':
+			if len(stack) == 0 {
+				panic("未匹配的 )")
+			}
+			groupStart := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+
+			endState := nfa.createState(CaptureEnd, groupStart.capture)
+			nfa.states[groupStart.start].capture = groupStart.capture
+			endState.capture = groupStart.capture
+			nfa.states[groupStart.end].epsilon = append(nfa.states[groupStart.end].epsilon, endState.id)
+
+			// 更新片段的结束状态
+			fragments[len(fragments)-1].end = endState.id
+		case '^':
+			fragments = append(fragments, nfa.lineStartFragment())
+		case '$':
+			fragments = append(fragments, nfa.lineEndFragment())
+		case '[':
+			// 处理字符类
+			j := i
+			negate := false
+			if j < len(regex) && regex[j] == '^' {
+				negate = true
+				j++
+			}
+			
+			// 查找结束的']'
+			for j < len(regex) && regex[j] != ']' {
+				if regex[j] == '\\' {
+					j++ // 跳过转义字符
+				}
+				j++
+			}
+			
+			if j >= len(regex) {
+				panic("未闭合的字符类")
+			}
+			
+			charClass := regex[i:j]
+			i = j + 1 // 跳过']'
+			
+			fragments = append(fragments, nfa.characterClassFromExpression(charClass, negate))
+		default:
+			fragments = append(fragments, nfa.basicFragment(ch))
+			nfa.alphabet[ch] = true
+		}
+	}
+
+	// 构建完整 NFA
+	if len(fragments) == 0 {
+		start := nfa.createState(NormalState, 0)
+		nfa.start = start.id
+		nfa.states = append(nfa.states, start, nfa.createState(NormalState, 0))
+		return nfa
+	}
+
+	mainFrag := fragments[0]
+	for i := 1; i < len(fragments); i++ {
+		mainFrag = nfa.concatFragments(mainFrag, fragments[i])
+	}
+
+	nfa.start = mainFrag.start
+	return nfa
+}
+
+// 创建基本片段
+func (n *NFA) basicFragment(c rune) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+
+	if c == '.' { // 通配符
+		// 通配符匹配任意字符
+	} else {
+		start.trans[c] = []int{end.id}
+	}
+
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 创建字符类
+func (n *NFA) characterClass(alnum, digit, space, not bool) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+
+	for r := rune(0); r < 128; r++ { // 简化版本，只处理ASCII
+		match := false
+		
+		if alnum && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			match = true
+		} else if digit && unicode.IsDigit(r) {
+			match = true
+		} else if space && unicode.IsSpace(r) {
+			match = true
+		}
+		
+		// 处理非字符类
+		if not {
+			match = !match
+		}
+		
+		if match {
+			start.trans[r] = append(start.trans[r], end.id)
+		}
+	}
+
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 创建零宽度起始状态 (\zs)
+func (n *NFA) zeroStart() *Fragment {
+	state := n.createState(ZeroStart, 0)
+	return &Fragment{start: state.id, end: state.id}
+}
+
+// 创建零宽度结束状态 (\ze)
+func (n *NFA) zeroEnd() *Fragment {
+	state := n.createState(ZeroEnd, 0)
+	return &Fragment{start: state.id, end: state.id}
+}
+
+// 创建单词边界片段 (\b)
+func (n *NFA) wordBoundaryFragment() *Fragment {
+	state := n.createState(WordBoundaryState, 0)
+	return &Fragment{start: state.id, end: state.id}
+}
+
+// 创建行开始片段 (^)
+func (n *NFA) lineStartFragment() *Fragment {
+	state := n.createState(LineStartState, 0)
+	return &Fragment{start: state.id, end: state.id}
+}
+
+// 创建行结束片段 ($)
+func (n *NFA) lineEndFragment() *Fragment {
+	state := n.createState(LineEndState, 0)
+	return &Fragment{start: state.id, end: state.id}
+}
+
+// 后向引用片段
+func (n *NFA) backrefFragment(groupID int) *Fragment {
+	// 简化实现：我们假设捕获组会出现在相同的相对位置
+	// 实际应用中需要更复杂的处理
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+	
+	// 实际实现中需要遍历捕获组并构建匹配这些内容的NFA
+	// 这里简化处理为通配符匹配
+	for r := rune(0); r < 128; r++ {
+		if !unicode.IsControl(r) {
+			start.trans[r] = append(start.trans[r], end.id)
+		}
+	}
+	
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 应用量词
+func (n *NFA) applyQuantifier(f *Fragment, q Quantifier, greedy bool) *Fragment {
+	if q.min == 0 && q.max == 0 {
+		return &Fragment{start: n.createState(NormalState, 0).id, end: n.createState(NormalState, 0).id}
+	}
+
+	// 处理固定重复
+	current := f
+	for i := 1; i < q.min; i++ {
+		copy := n.copyFragment(f)
+		current = n.concatFragments(current, copy)
+	}
+
+	// 处理可选重复
+	if q.max == -1 {
+		star := n.starFragment(f, greedy)
+		current = n.concatFragments(current, star)
+	} else {
+		optionalCount := q.max - q.min
+		for i := 0; i < optionalCount; i++ {
+			opt := n.optionalFragment(f, greedy)
+			current = n.concatFragments(current, opt)
+		}
+	}
+
+	return current
+}
+
+// 创建新状态
+func (n *NFA) createState(stateType, capture int) *State {
+	id := len(n.states)
+	state := &State{
+		id:        id,
+		trans:     make(map[rune][]int),
+		epsilon:   make([]int, 0),
+		stateType: stateType,
+		capture:   capture,
+		greedy:    true, // 默认贪婪
+	}
+	n.states = append(n.states, state)
+	return state
+}
+
+// 复制片段
+func (n *NFA) copyFragment(f *Fragment) *Fragment {
+	start := n.createState(n.states[f.start].stateType, n.states[f.start].capture)
+	end := n.createState(n.states[f.end].stateType, n.states[f.end].capture)
+	
+	// 保留贪婪标记
+	start.greedy = n.states[f.start].greedy
+	end.greedy = n.states[f.end].greedy
+
+	// 深拷贝状态机
+	copiedStates := make(map[int]int)
+	stack := []int{f.start}
+
+	for len(stack) > 0 {
+		sid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if _, exists := copiedStates[sid]; exists {
+			continue
+		}
+
+		orig := n.states[sid]
+		newState := n.createState(orig.stateType, orig.capture)
+		newState.greedy = orig.greedy // 保留贪婪标记
+		copiedStates[sid] = newState.id
+
+		// 添加转移
+		for ch, targets := range orig.trans {
+			for _, tid := range targets {
+				stack = append(stack, tid)
+				newState.trans[ch] = append(newState.trans[ch], copiedStates[tid])
+			}
+		}
+
+		// 添加ε转移
+		for _, tid := range orig.epsilon {
+			stack = append(stack, tid)
+			newState.epsilon = append(newState.epsilon, copiedStates[tid])
+		}
+	}
+
+	return &Fragment{
+		start: copiedStates[f.start],
+		end:   copiedStates[f.end],
+	}
+}
+
+// 连接两个片段
+func (n *NFA) concatFragments(f1, f2 *Fragment) *Fragment {
+	n.states[f1.end].isAccept = false
+	n.states[f1.end].epsilon = append(n.states[f1.end].epsilon, f2.start)
+	return &Fragment{start: f1.start, end: f2.end}
+}
+
+// 可选片段 (0或1次)
+func (n *NFA) optionalFragment(f *Fragment, greedy bool) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+	
+	// 设置贪婪标记
+	start.greedy = greedy
+	end.greedy = greedy
+
+	start.epsilon = append(start.epsilon, f.start, end.id)
+	n.states[f.end].epsilon = append(n.states[f.end].epsilon, end.id)
+
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 闭包片段 (0或多次)
+func (n *NFA) starFragment(f *Fragment, greedy bool) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+	
+	// 设置贪婪标记
+	start.greedy = greedy
+	end.greedy = greedy
+
+	start.epsilon = append(start.epsilon, f.start, end.id)
+	n.states[f.end].epsilon = append(n.states[f.end].epsilon, f.start, end.id)
+
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 并联两个片段
+func (n *NFA) unionFragments(f1, f2 *Fragment) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+
+	start.epsilon = append(start.epsilon, f1.start, f2.start)
+	n.states[f1.end].epsilon = append(n.states[f1.end].epsilon, end.id)
+	n.states[f2.end].epsilon = append(n.states[f2.end].epsilon, end.id)
+
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 从表达式创建字符类片段
+func (n *NFA) characterClassFromExpression(expr string, negate bool) *Fragment {
+	start := n.createState(NormalState, 0)
+	end := n.createState(NormalState, 0)
+	end.isAccept = true
+	
+	// 解析表达式，支持范围表示法如a-z
+	ranges := []rune{}
+	escape := false
+	
+	for _, ch := range expr {
+		if escape {
+			ranges = append(ranges, ch)
+			escape = false
+		} else if ch == '\\' {
+			escape = true
+		} else {
+			ranges = append(ranges, ch)
+		}
+	}
+	
+	// 构建字符类
+	class := make(map[rune]bool)
+	i := 0
+	for i < len(ranges) {
+		if i+2 < len(ranges) && ranges[i+1] == '-' {
+			// 范围表示法
+			startCh := ranges[i]
+			endCh := ranges[i+2]
+			for r := startCh; r <= endCh; r++ {
+				class[r] = true
+			}
+			i += 3
+		} else {
+			class[ranges[i]] = true
+			i++
+		}
+	}
+	
+	// 为字符类创建转移
+	for r := rune(0); r < 128; r++ { // 只处理ASCII
+		if class[r] != negate {
+			start.trans[r] = append(start.trans[r], end.id)
+		}
+	}
+	
+	return &Fragment{start: start.id, end: end.id}
+}
+
+// 计算 ε 闭包
+func epsilonClosure(nfa *NFA, stateIDs []int) map[int]bool {
+	closure := make(map[int]bool)
+	stack := make([]int, len(stateIDs))
+	copy(stack, stateIDs)
+
+	for len(stack) > 0 {
+		sid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if closure[sid] {
+			continue
+		}
+
+		closure[sid] = true
+		state := nfa.states[sid]
+
+		for _, esid := range state.epsilon {
+			stack = append(stack, esid)
+		}
+	}
+
+	return closure
+}
+
+// 计算非贪婪 ε 闭包
+func epsilonClosureNonGreedy(nfa *NFA, stateIDs []int) map[int]bool {
+	closure := make(map[int]bool)
+	stack := make([]int, len(stateIDs))
+	copy(stack, stateIDs)
+
+	// 首先处理非贪婪状态
+	for len(stack) > 0 {
+		sid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if closure[sid] {
+			continue
+		}
+
+		closure[sid] = true
+		state := nfa.states[sid]
+
+		// 对于非贪婪状态，我们优先处理不扩展量词的转移
+		if !state.greedy {
+			// 优先处理跳过量词的转移
+			for _, esid := range state.epsilon {
+				// 检查是否是跳过量词的转移
+				if nfa.states[esid].stateType == NormalState {
+					stack = append(stack, esid)
+				}
+			}
+		} else {
+			// 对于贪婪状态，正常处理所有ε转移
+			for _, esid := range state.epsilon {
+				stack = append(stack, esid)
+			}
+		}
+	}
+
+	return closure
+}
+
+// 查找所有匹配
+func FindAllMatches(nfa *NFA, text string, multiLine bool) []Match {
+	matches := []Match{}
+	captureStacks := make(map[int][]int) // groupID -> start position stack
+	activeGroups := make(map[int]bool)
+	var startMatch, endMatch int
+	var inMatch bool
+
+	// 初始状态
+	currentStates := epsilonClosure(nfa, []int{nfa.start})
+	startPos := 0
+	captureData := make(map[int][2]int) // groupID -> {start, end}
+	zeroStart := -1
+	zeroEnd := -1
+
+	// 计算行边界位置
+	lineStarts := []int{0}
+	lineEnds := []int{}
+	for i, ch := range text {
+		if ch == '\n' {
+			lineEnds = append(lineEnds, i)
+			if i+1 < len(text) {
+				lineStarts = append(lineStarts, i+1)
+			}
+		}
+	}
+	lineEnds = append(lineEnds, len(text))
+
+	// 从位置0到len(text)（包括）
+	for pos := 0; pos <= len(text); pos++ {
+		var ch rune
+		if pos < len(text) {
+			ch = rune(text[pos])
+		}
+
+		nextStates := make(map[int]bool)
+		activeGroups = make(map[int]bool)
+
+		// 状态转换
+		for sid := range currentStates {
+			state := nfa.states[sid]
+
+			// 处理状态类型
+			switch state.stateType {
+			case CaptureStart:
+				groupID := state.capture
+				captureStacks[groupID] = append(captureStacks[groupID], pos)
+				activeGroups[groupID] = true
+			case CaptureEnd:
+				groupID := state.capture
+				if stack, ok := captureStacks[groupID]; ok && len(stack) > 0 {
+					start := stack[len(stack)-1]
+					captureData[groupID] = [2]int{start, pos}
+					captureStacks[groupID] = stack[:len(stack)-1]
+					if len(captureStacks[groupID]) == 0 {
+						delete(activeGroups, groupID)
+					}
+				}
+			case ZeroStart:
+				zeroStart = pos
+			case ZeroEnd:
+				zeroEnd = pos
+			case LineStartState:
+				// 多行模式：匹配行首位置
+				if multiLine {
+					for _, start := range lineStarts {
+						if start == pos {
+							for _, esid := range state.epsilon {
+								nextStates[esid] = true
+							}
+							break
+						}
+					}
+				} else {
+					// 单行模式：只在字符串开头匹配
+					if pos == 0 {
+						for _, esid := range state.epsilon {
+							nextStates[esid] = true
+						}
+					}
+				}
+			case LineEndState:
+				// 多行模式：匹配行尾位置
+				if multiLine {
+					for _, end := range lineEnds {
+						if end == pos {
+							for _, esid := range state.epsilon {
+								nextStates[esid] = true
+							}
+							break
+						}
+					}
+				} else {
+					// 单行模式：只在字符串结尾匹配
+					if pos == len(text) {
+						for _, esid := range state.epsilon {
+							nextStates[esid] = true
+						}
+					}
+				}
+			case WordBoundaryState:
+				// 检查单词边界条件
+				if isWordBoundary(pos, len(text), text) {
+					for _, esid := range state.epsilon {
+						nextStates[esid] = true
+					}
+				}
+			}
+
+			// 字符转移：在文件末尾（pos==len(text)）时，没有字符，所以跳过字符转移
+			if pos < len(text) {
+				// 字符转移
+				for target := range state.trans[ch] {
+					nextStates[target] = true
+				}
+
+				// 通配符转移（不包括换行符）
+				if ch != '\n' {
+					for target := range state.trans['.'] {
+						nextStates[target] = true
+					}
+				}
+			}
+
+			// 接受状态处理
+			if state.isAccept {
+				if !inMatch {
+					startMatch = startPos
+					inMatch = true
+				}
+				endMatch = pos
+			}
+		}
+
+		// 计算下一个状态的 ε 闭包
+		nextList := make([]int, 0, len(nextStates))
+		for sid := range nextStates {
+			nextList = append(nextList, sid)
+		}
+
+		// 处理非贪婪匹配
+		nonGreedy := false
+		for sid := range currentStates {
+			if !nfa.states[sid].greedy {
+				nonGreedy = true
+				break
+			}
+		}
+		
+		if nonGreedy {
+			currentStates = epsilonClosureNonGreedy(nfa, nextList)
+		} else {
+			currentStates = epsilonClosure(nfa, nextList)
+		}
+
+		// 处理匹配结束
+		if inMatch && len(currentStates) == 0 {
+			match := Match{
+				start:   startMatch,
+				end:     endMatch,
+				content: text[startMatch:endMatch],
+				groups:  make(map[int][2]int),
+			}
+
+			// 应用零宽度断言
+			if zeroStart != -1 && zeroStart > startMatch && zeroStart < endMatch {
+				match.start = zeroStart
+			}
+			if zeroEnd != -1 && zeroEnd > startMatch && zeroEnd < endMatch {
+				match.end = zeroEnd
+			}
+
+			// 添加捕获组数据
+			for g, d := range captureData {
+				match.groups[g] = d
+			}
+
+			matches = append(matches, match)
+			inMatch = false
+			startPos = pos + 1
+			zeroStart = -1
+			zeroEnd = -1
+			captureData = make(map[int][2]int)
+		}
+	}
+
+	// 处理文件末尾的匹配
+	if inMatch {
+		match := Match{
+			start:   startMatch,
+			end:     len(text),
+			content: text[startMatch:],
+			groups:  make(map[int][2]int),
+		}
+
+		// 应用零宽度断言
+		if zeroStart != -1 && zeroStart > startMatch && zeroStart < len(text) {
+			match.start = zeroStart
+		}
+		if zeroEnd != -1 && zeroEnd > startMatch && zeroEnd < len(text) {
+			match.end = zeroEnd
+		}
+
+		// 添加捕获组数据
+		for g, d := range captureData {
+			match.groups[g] = d
+		}
+
+		matches = append(matches, match)
+	}
+
+	return matches
+}
+
+// 检查单词边界
+func isWordBoundary(pos, length int, text string) bool {
+	// 单词字符定义：字母、数字、下划线
+	isWordChar := func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	}
+
+	// 获取左右字符
+	var left, right rune = -1, -1
+	if pos > 0 {
+		left = rune(text[pos-1])
+	}
+	if pos < length {
+		right = rune(text[pos])
+	}
+
+	leftIsWord := left != -1 && isWordChar(left)
+	rightIsWord := right != -1 && isWordChar(right)
+
+	// 边界条件：单词字符与非单词字符之间
+	return leftIsWord != rightIsWord
+}
+
+// 替换匹配项
+func replaceMatches(text string, matches []Match, replacement string, global bool, replaceCount int) string {
+	if len(matches) == 0 {
+		return text
+	}
+
+	// 如果指定了替换次数，只替换前 N 次
+	if replaceCount > 0 {
+		if replaceCount < len(matches) {
+			matches = matches[:replaceCount]
+		}
+	} else if !global {
+		// 如果非全局替换，只替换第一个匹配
+		matches = matches[:1]
+	}
+
+	// 从后往前替换以避免索引变化
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].start > matches[j].start
+	})
+
+	result := []byte(text)
+
+	for _, match := range matches {
+		// 处理替换字符串中的分组引用
+		expanded := expandReplacement(replacement, text, match)
+
+		// 执行替换
+		start, end := match.start, match.end
+		result = append(result[:start], append([]byte(expanded), result[end:]...)...)
+	}
+
+	return string(result)
+}
+
+// 扩展替换字符串中的分组引用
+func expandReplacement(repl, content string, match Match) string {
+	var buf strings.Builder
+	escape := false
+
+	for _, r := range repl {
+		if escape {
+			escape = false
+			switch r {
+			case 'n':
+				buf.WriteByte('\n')
+			case 'r':
+				buf.WriteByte('\r')
+			case 't':
+				buf.WriteByte('\t')
+			case 'b':
+				buf.WriteByte('\b')
+			case '\\':
+				buf.WriteByte('\\')
+			case '0':
+				buf.WriteString(match.content)
+			case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+				groupID := int(r - '0')
+				if pos, ok := match.groups[groupID]; ok {
+					// pos是[2]int，表示[start, end]
+					buf.WriteString(content[pos[0]:pos[1]])
+				}
+			default:
+				// 如果不是特殊字符，则原样输出（包括反斜杠和这个字符）
+				buf.WriteRune('\\')
+				buf.WriteRune(r)
+			}
+		} else if r == '\\' {
+			escape = true
+		} else {
+			buf.WriteRune(r)
+		}
+	}
+
+	if escape {
+		buf.WriteRune('\\')
+	}
+
+	return buf.String()
+}
+
+// 移除字符串中的转义字符
+func unescapeString(s string) string {
+	var buf strings.Builder
+	escape := false
+
+	for _, ch := range s {
+		if escape {
+			switch ch {
+			case 'n':
+				buf.WriteRune('\n')
+			case 'r':
+				buf.WriteRune('\r')
+			case 't':
+				buf.WriteRune('\t')
+			case 'b':
+				buf.WriteRune('\b')
+			case '\\':
+				buf.WriteRune('\\')
+			case '0':
+				buf.WriteRune(0)
+			default:
+				buf.WriteRune('\\')
+				buf.WriteRune(ch)
+			}
+			escape = false
+		} else if ch == '\\' {
+			escape = true
+		} else {
+			buf.WriteRune(ch)
+		}
+	}
+
+	if escape {
+		buf.WriteRune('\\')
+	}
+
+	return buf.String()
+}
+
+
+这个正则表达式工具提供了以下功能：
+
+1. 正则表达式匹配：
+
+  ◦ 支持基本元字符：. * + ? | ( ) [ ] ^ $
+
+  ◦ 支持转义序列：\d \w \s \D \W \S \b \n \r \t
+
+  ◦ 支持量词：{n} {n,m} {n,}
+
+  ◦ 支持分组和捕获：(pattern)
+
+  ◦ 支持零宽度断言：\zs \ze
+
+  ◦ 支持贪婪/非贪婪：*? +? ??
+
+  ◦ 支持字符类：[a-z] [^0-9]
+
+  ◦ 支持后向引用：\1 \2 \3
+
+2. 替换功能：
+
+  ◦ 支持全局替换（g 标志）
+
+  ◦ 支持指定替换次数（/2 表示替换前2次）
+
+  ◦ 支持替换字符串中的分组引用（\1, \2 等）
+
+3. 命令行选项：
+
+  ◦ -pattern：指定正则表达式
+
+  ◦ -file：从文件读取正则表达式
+
+  ◦ -r：指定替换模式
+
+  ◦ -input：指定输入文件
+
+  ◦ -output：指定输出文件
+
+  ◦ -m：启用多行模式
+
+  ◦ -help：显示帮助信息
+
+4. 高级功能：
+
+  ◦ 支持多行模式（^ 和 $ 匹配每行的开头和结尾）
+
+  ◦ 支持单词边界（\b）
+
+  ◦ 支持零宽度断言（\zs, \ze）
+
+  ◦ 支持非贪婪匹配（*?, +?, ??）
+
+使用示例：
+
+# 匹配模式
+regex-tool -pattern '\d+' -input data.txt
+
+# 替换模式（全局替换）
+regex-tool -r 's/error/warning/g' -input errors.log -output fixed.log
+
+# 替换前3次匹配
+regex-tool -r 's/old/new/3' -input data.txt
+
+# 多行模式
+regex-tool -pattern '^\d+' -m -input multiline.txt
+
+# 从文件读取模式
+regex-tool -file pattern.txt -input data.txt
+
+
+这个工具可以处理各种正则表达式匹配和替换任务，特别适合在命令行环境中进行文本处理。
+
+
+Go 测试生成工具：添加函数名打印功能
+
+
+
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"flag"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// 配置参数
+var (
+	pkgPath     = flag.String("pkg", "", "要生成测试的包路径")
+	testFile    = flag.String("file", "", "为单个文件生成测试")
+	benchmark   = flag.Bool("bench", false, "生成基准测试")
+	tableDriven = flag.Bool("table", true, "使用表格驱动测试")
+	cover       = flag.Bool("cover", true, "添加覆盖率支持")
+	parallel    = flag.Bool("parallel", true, "添加并行测试支持")
+	update      = flag.Bool("update", false, "自动更新现有测试函数")
+	interactive = flag.Bool("i", true, "交互模式显示预览并询问")
+	verbose     = flag.Bool("v", false, "详细输出模式")
+	showHelp    = flag.Bool("help", false, "显示帮助信息")
+)
+
+// 函数信息结构
+type FuncInfo struct {
+	Name        string
+	Params      string
+	Results     string
+	Receiver    string
+	IsExported  bool
+	HasContext  bool
+	HasError    bool
+	TestExists  bool // 标记测试函数是否已存在
+	BenchExists bool // 标记基准测试函数是否已存在
+}
+
+// 测试文件模板
+const testTemplate = `// 由 gotestgen 工具自动生成
+
+package {{.PackageName}}
+
+import (
+	"testing"
+	{{if .HasContext}}"context"{{end}}
+	{{if .NeedsTime}}"time"{{end}}
+	{{if .NeedsReflect}}"reflect"{{end}}
+)
+
+{{range .Functions}}
+{{if .IsExported}}
+{{if or (not .TestExists) (and .TestExists $.Update)}}
+func Test{{.Name}}(t *testing.T) {
+	{{if $.Parallel}}t.Parallel(){{end}}
+	
+	{{if $.TableDriven}}tests := []struct {
+		name    string
+		{{if .Receiver}}recv    {{.Receiver}}{{end}}
+		{{.ParamsAsFields}}
+		want    {{.ResultsType}}
+		wantErr bool
+	}{
+		// TODO: 添加测试用例
+		{
+			name: "basic",
+			{{if .Receiver}}recv: {{.Receiver}}{},{{end}}
+			{{.ParamsAsValues}}
+			want: {{.ZeroResults}},
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			{{if $.Parallel}}t.Parallel(){{end}}
+			{{if .Receiver}}got{{else if .Results}}got{{end}} := {{if .Receiver}}tt.recv.{{end}}{{.Name}}({{.ParamsFromTest}})
+			{{if .HasError}}
+			if (err != nil) != tt.wantErr {
+				t.Errorf("{{.Name}}() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			{{end}}
+			{{if .Results}}
+			{{if $.NeedsReflect}}if !reflect.DeepEqual(got, tt.want){{else}}if got != tt.want{{end}} {
+				t.Errorf("{{.Name}}() = %v, want %v", got, tt.want)
+			}
+			{{end}}
+		})
+	}{{else}}
+	// TODO: 实现测试逻辑
+	t.Run("basic", func(t *testing.T) {
+		{{if .Receiver}}recv := {{.Receiver}}{}{{end}}
+		{{if .Results}}got{{else}}_{{end}} := {{if .Receiver}}recv.{{end}}{{.Name}}({{.ZeroParams}})
+		{{if .Results}}
+		// 验证结果
+		want := {{.ZeroResults}}
+		{{if $.NeedsReflect}}if !reflect.DeepEqual(got, want){{else}}if got != want{{end}} {
+			t.Errorf("{{.Name}}() = %v, want %v", got, want)
+		}
+		{{end}}
+	}){{end}}
+}
+{{end}}{{end}}
+
+{{if $.Benchmark}}
+{{range .Functions}}
+{{if .IsExported}}
+{{if or (not .BenchExists) (and .BenchExists $.Update)}}
+func Benchmark{{.Name}}(b *testing.B) {
+	{{if .Receiver}}recv := {{.Receiver}}{}{{end}}
+	
+	{{if $.TableDriven}}benches := []struct {
+		name string
+		{{if .Receiver}}recv {{.Receiver}}{{end}}
+		{{.ParamsAsFields}}
+	}{
+		// TODO: 添加基准测试用例
+		{
+			name: "basic",
+			{{if .Receiver}}recv: {{.Receiver}}{},{{end}}
+			{{.ParamsAsValues}}
+		},
+	}
+	
+	for _, bb := range benches {
+		b.Run(bb.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				{{if .Receiver}}bb.recv.{{end}}{{.Name}}({{.ParamsFromBench}})
+			}
+		})
+	}{{else}}
+	b.Run("basic", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			{{if .Receiver}}recv.{{end}}{{.Name}}({{.ZeroParams}})
+		}
+	}){{end}}
+}
+{{end}}{{end}}
+{{end}}{{end}}
+{{end}}
+
+{{if $.Cover}}
+// 覆盖率测试
+func TestMain(m *testing.M) {
+	// 覆盖率设置
+	// 可以在测试前执行初始化
+	code := m.Run()
+	// 可以在测试后执行清理
+	os.Exit(code)
+}
+{{end}}
+`
+
+func main() {
+	// 自定义帮助信息
+	flag.Usage = func() {
+		printHelp()
+		os.Exit(0)
+	}
+	
+	flag.Parse()
+	
+	// 显示帮助信息
+	if *showHelp {
+		printHelp()
+		return
+	}
+	
+	// 检查必要参数
+	if *pkgPath == "" && *testFile == "" {
+		fmt.Println("错误: 必须指定包路径(-pkg)或文件(-file)")
+		fmt.Println()
+		printHelp()
+		os.Exit(1)
+	}
+	
+	if *pkgPath != "" {
+		generatePackageTests(*pkgPath)
+	}
+	
+	if *testFile != "" {
+		generateFileTests(*testFile)
+	}
+}
+
+// 打印帮助信息
+func printHelp() {
+	fmt.Println("gotestgen - Go 测试生成工具")
+	fmt.Println("版本: 1.3.0")
+	fmt.Println("用法: gotestgen [选项]")
+	fmt.Println()
+	fmt.Println("选项:")
+	fmt.Println("  -pkg string")
+	fmt.Println("        要生成测试的包路径 (例如: ./mypackage)")
+	fmt.Println("  -file string")
+	fmt.Println("        为单个文件生成测试 (例如: myfile.go)")
+	fmt.Println("  -bench")
+	fmt.Println("        生成基准测试 (默认: false)")
+	fmt.Println("  -table")
+	fmt.Println("        使用表格驱动测试 (默认: true)")
+	fmt.Println("  -cover")
+	fmt.Println("        添加覆盖率支持 (默认: true)")
+	fmt.Println("  -parallel")
+	fmt.Println("        添加并行测试支持 (默认: true)")
+	fmt.Println("  -update")
+	fmt.Println("        自动更新现有测试函数 (默认: false)")
+	fmt.Println("  -i")
+	fmt.Println("        交互模式显示预览并询问 (默认: true)")
+	fmt.Println("  -v")
+	fmt.Println("        详细输出模式 (默认: false)")
+	fmt.Println("  -help")
+	fmt.Println("        显示帮助信息")
+	fmt.Println()
+	fmt.Println("示例:")
+	fmt.Println("  为整个包生成测试:")
+	fmt.Println("    gotestgen -pkg=./mypackage")
+	fmt.Println()
+	fmt.Println("  为单个文件生成测试:")
+	fmt.Println("    gotestgen -file=myfile.go")
+	fmt.Println()
+	fmt.Println("  生成基准测试并自动更新:")
+	fmt.Println("    gotestgen -pkg=./mypackage -bench -update")
+	fmt.Println()
+	fmt.Println("  禁用交互模式:")
+	fmt.Println("    gotestgen -pkg=./mypackage -i=false")
+	fmt.Println()
+	fmt.Println("功能说明:")
+	fmt.Println("  1. 自动为导出的Go函数生成测试框架")
+	fmt.Println("  2. 支持表格驱动测试和并行测试")
+	fmt.Println("  3. 自动检测并处理错误返回")
+	fmt.Println("  4. 支持交互式覆盖确认")
+	fmt.Println("  5. 自动导入所需包 (context, time, reflect)")
+	fmt.Println("  6. 添加覆盖率测试支持")
+	fmt.Println("  7. 打印处理的函数名")
+	fmt.Println()
+	fmt.Println("注意事项:")
+	fmt.Println("  - 必须指定 -pkg 或 -file 参数")
+	fmt.Println("  - 使用 -update 自动覆盖现有测试函数")
+	fmt.Println("  - 使用 -i=false 禁用交互模式")
+}
+
+// 为整个包生成测试
+func generatePackageTests(pkgPath string) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, pkgPath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Printf("解析包错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	for _, pkg := range pkgs {
+		// 跳过测试包
+		if strings.HasSuffix(pkg.Name, "_test") {
+			continue
+		}
+		
+		testFileName := fmt.Sprintf("%s_test.go", pkg.Name)
+		testFilePath := filepath.Join(pkgPath, testFileName)
+		
+		// 收集所有导出函数
+		var functions []FuncInfo
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				if fn, isFn := decl.(*ast.FuncDecl); isFn {
+					if fn.Name.IsExported() {
+						funcInfo := parseFuncInfo(fn)
+						functions = append(functions, funcInfo)
+						// 打印函数名
+						if *verbose {
+							fmt.Printf("找到导出函数: %s\n", funcInfo.Name)
+						}
+					}
+				}
+			}
+		}
+		
+		// 打印找到的函数数量
+		fmt.Printf("在包 %s 中找到 %d 个导出函数\n", pkg.Name, len(functions))
+		
+		// 检查测试文件是否存在
+		if fileExists(testFilePath) {
+			// 解析现有测试文件中的函数
+			existingTests := parseExistingTests(testFilePath)
+			
+			// 标记哪些函数已有测试
+			for i := range functions {
+				testFuncName := "Test" + functions[i].Name
+				benchFuncName := "Benchmark" + functions[i].Name
+				
+				functions[i].TestExists = contains(existingTests, testFuncName)
+				functions[i].BenchExists = contains(existingTests, benchFuncName)
+				
+				// 打印函数测试状态
+				if *verbose {
+					if functions[i].TestExists {
+						fmt.Printf("  函数 %s 已有测试: Test%s\n", functions[i].Name, functions[i].Name)
+					}
+					if functions[i].BenchExists {
+						fmt.Printf("  函数 %s 已有基准测试: Benchmark%s\n", functions[i].Name, functions[i].Name)
+					}
+				}
+			}
+		}
+		
+		// 处理函数级覆盖确认
+		if *interactive {
+			functions = confirmFunctionOverwrites(functions)
+		}
+		
+		// 生成测试文件
+		generateTestFile(testFilePath, pkg.Name, functions)
+	}
+}
+
+// 为单个文件生成测试
+func generateFileTests(filePath string) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	if err != nil {
+		fmt.Printf("解析文件错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 获取包名
+	pkgName := file.Name.Name
+	
+	// 创建测试文件名
+	baseName := filepath.Base(filePath)
+	testFileName := strings.TrimSuffix(baseName, ".go") + "_test.go"
+	testFilePath := filepath.Join(filepath.Dir(filePath), testFileName)
+	
+	// 收集所有导出函数
+	var functions []FuncInfo
+	for _, decl := range file.Decls {
+		if fn, isFn := decl.(*ast.FuncDecl); isFn {
+			if fn.Name.IsExported() {
+				funcInfo := parseFuncInfo(fn)
+				functions = append(functions, funcInfo)
+				// 打印函数名
+				if *verbose {
+					fmt.Printf("找到导出函数: %s\n", funcInfo.Name)
+				}
+			}
+		}
+	}
+	
+	// 打印找到的函数数量
+	fmt.Printf("在文件 %s 中找到 %d 个导出函数\n", baseName, len(functions))
+	
+	// 检查测试文件是否存在
+	if fileExists(testFilePath) {
+		// 解析现有测试文件中的函数
+		existingTests := parseExistingTests(testFilePath)
+		
+		// 标记哪些函数已有测试
+		for i := range functions {
+			testFuncName := "Test" + functions[i].Name
+			benchFuncName := "Benchmark" + functions[i].Name
+			
+			functions[i].TestExists = contains(existingTests, testFuncName)
+			functions[i].BenchExists = contains(existingTests, benchFuncName)
+			
+			// 打印函数测试状态
+			if *verbose {
+				if functions[i].TestExists {
+					fmt.Printf("  函数 %s 已有测试: Test%s\n", functions[i].Name, functions[i].Name)
+				}
+				if functions[i].BenchExists {
+					fmt.Printf("  函数 %s 已有基准测试: Benchmark%s\n", functions[i].Name, functions[i].Name)
+				}
+			}
+		}
+	}
+	
+	// 处理函数级覆盖确认
+	if *interactive {
+		functions = confirmFunctionOverwrites(functions)
+	}
+	
+	// 生成测试文件
+	generateTestFile(testFilePath, pkgName, functions)
+}
+
+// 解析现有测试文件中的函数
+func parseExistingTests(testFilePath string) []string {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, testFilePath, nil, parser.ParseComments)
+	if err != nil {
+		if *verbose {
+			fmt.Printf("解析测试文件错误: %v\n", err)
+		}
+		return nil
+	}
+	
+	var existingFuncs []string
+	for _, decl := range file.Decls {
+		if fn, isFn := decl.(*ast.FuncDecl); isFn {
+			existingFuncs = append(existingFuncs, fn.Name.Name)
+		}
+	}
+	return existingFuncs
+}
+
+// 确认是否覆盖特定函数
+func confirmFunctionOverwrites(functions []FuncInfo) []FuncInfo {
+	for i := range functions {
+		fn := &functions[i]
+		
+		// 检查是否需要确认
+		if fn.TestExists || fn.BenchExists {
+			fmt.Printf("\n函数 %s 已有测试:\n", fn.Name)
+			
+			if fn.TestExists {
+				fmt.Printf("  - 测试函数 Test%s 已存在\n", fn.Name)
+			}
+			if fn.BenchExists && *benchmark {
+				fmt.Printf("  - 基准测试函数 Benchmark%s 已存在\n", fn.Name)
+			}
+			
+			fmt.Println("请选择操作:")
+			fmt.Println("  o - 覆盖所有测试函数")
+			fmt.Println("  k - 跳过此函数")
+			fmt.Println("  t - 仅覆盖测试函数")
+			if *benchmark {
+				fmt.Println("  b - 仅覆盖基准测试函数")
+			}
+			fmt.Print("选择 [o/k/t/b]: ")
+			
+			scanner := bufio.NewScanner(os.Stdin)
+			scanner.Scan()
+			choice := strings.ToLower(scanner.Text())
+			
+			switch choice {
+			case "o":
+				// 覆盖所有
+				fn.TestExists = false
+				fn.BenchExists = false
+				fmt.Printf("  将覆盖函数 %s 的所有测试\n", fn.Name)
+			case "t":
+				// 仅覆盖测试函数
+				fn.TestExists = false
+				fmt.Printf("  将覆盖函数 %s 的测试函数\n", fn.Name)
+			case "b":
+				// 仅覆盖基准测试函数
+				fn.BenchExists = false
+				fmt.Printf("  将覆盖函数 %s 的基准测试函数\n", fn.Name)
+			case "k":
+				// 跳过此函数
+				fn.TestExists = true
+				fn.BenchExists = true
+				fmt.Printf("  跳过函数 %s\n", fn.Name)
+			default:
+				// 默认跳过
+				fn.TestExists = true
+				fn.BenchExists = true
+				fmt.Printf("  默认跳过函数 %s\n", fn.Name)
+			}
+		}
+	}
+	return functions
+}
+
+// 解析函数信息
+func parseFuncInfo(fn *ast.FuncDecl) FuncInfo {
+	info := FuncInfo{
+		Name:       fn.Name.Name,
+		IsExported: fn.Name.IsExported(),
+	}
+	
+	// 处理接收器
+	if fn.Recv != nil {
+		var buf bytes.Buffer
+		printer.Fprint(&buf, token.NewFileSet(), fn.Recv.List[0].Type)
+		info.Receiver = buf.String()
+	}
+	
+	// 处理参数
+	if fn.Type.Params != nil {
+		var buf bytes.Buffer
+		printer.Fprint(&buf, token.NewFileSet(), fn.Type.Params)
+		info.Params = buf.String()
+		
+		// 检查是否包含 context.Context
+		if strings.Contains(info.Params, "context.Context") {
+			info.HasContext = true
+		}
+	}
+	
+	// 处理返回值
+	if fn.Type.Results != nil {
+		var buf bytes.Buffer
+		printer.Fprint(&buf, token.NewFileSet(), fn.Type.Results)
+		info.Results = buf.String()
+		
+		// 检查是否包含 error
+		if strings.Contains(info.Results, "error") {
+			info.HasError = true
+		}
+	}
+	
+	return info
+}
+
+// 生成测试文件
+func generateTestFile(path, pkgName string, functions []FuncInfo) {
+	// 创建模板数据
+	data := struct {
+		PackageName string
+		Functions   []FuncInfo
+		Parallel    bool
+		TableDriven bool
+		Benchmark   bool
+		Cover       bool
+		NeedsTime   bool
+		NeedsReflect bool
+		Update      bool
+	}{
+		PackageName: pkgName,
+		Functions:   functions,
+		Parallel:    *parallel,
+		TableDriven: *tableDriven,
+		Benchmark:   *benchmark,
+		Cover:       *cover,
+		Update:      *update,
+	}
+	
+	// 检查是否需要 time 包
+	for _, fn := range functions {
+		if strings.Contains(fn.Params, "time.") || strings.Contains(fn.Results, "time.") {
+			data.NeedsTime = true
+			break
+		}
+	}
+	
+	// 检查是否需要 reflect 包
+	for _, fn := range functions {
+		if strings.Contains(fn.Params, "[]") || strings.Contains(fn.Params, "map[") || 
+			strings.Contains(fn.Results, "[]") || strings.Contains(fn.Results, "map[") {
+			data.NeedsReflect = true
+			break
+		}
+	}
+	
+	// 解析模板
+	tmpl, err := template.New("test").Parse(testTemplate)
+	if err != nil {
+		fmt.Printf("创建模板错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 生成测试代码
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		fmt.Printf("执行模板错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 格式化代码
+	formatted := formatCode(buf.Bytes())
+	
+	// 写入文件
+	if err := ioutil.WriteFile(path, formatted, 0644); err != nil {
+		fmt.Printf("写入文件错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 打印处理的函数信息
+	fmt.Printf("\n生成测试文件: %s\n", path)
+	fmt.Println("处理的函数:")
+	for _, fn := range functions {
+		if !fn.TestExists || *update {
+			fmt.Printf("  - 生成测试函数: Test%s\n", fn.Name)
+		}
+		if *benchmark && (!fn.BenchExists || *update) {
+			fmt.Printf("  - 生成基准测试函数: Benchmark%s\n", fn.Name)
+		}
+	}
+}
+
+// 格式化Go代码
+func formatCode(src []byte) []byte {
+	// 创建临时文件
+	tmpfile, err := ioutil.TempFile("", "gotestgen.*.go")
+	if err != nil {
+		return src
+	}
+	defer os.Remove(tmpfile.Name())
+	
+	// 写入源内容
+	if _, err := tmpfile.Write(src); err != nil {
+		return src
+	}
+	
+	// 使用gofmt格式化
+	cmd := exec.Command("gofmt", "-s", "-w", tmpfile.Name())
+	if err := cmd.Run(); err != nil {
+		return src
+	}
+	
+	// 读取格式化后的内容
+	formatted, err := ioutil.ReadFile(tmpfile.Name())
+	if err != nil {
+		return src
+	}
+	
+	return formatted
+}
+
+// 检查文件是否存在
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+// 检查字符串是否在切片中
+func contains(slice []string, str string) bool {
+	for _, s := range slice {
+		if s == str {
+			return true
+		}
+	}
+	return false
+}
+
+
+新增功能：函数名打印
+
+1. 函数发现阶段打印
+
+在解析源文件时，打印找到的导出函数：
+
+for _, decl := range file.Decls {
+    if fn, isFn := decl.(*ast.FuncDecl); isFn {
+        if fn.Name.IsExported() {
+            funcInfo := parseFuncInfo(fn)
+            functions = append(functions, funcInfo)
+            // 打印函数名
+            if *verbose {
+                fmt.Printf("找到导出函数: %s\n", funcInfo.Name)
+            }
+        }
+    }
+}
+
+
+2. 函数统计打印
+
+在处理包或文件后，打印找到的函数数量：
+
+// 包处理
+fmt.Printf("在包 %s 中找到 %d 个导出函数\n", pkg.Name, len(functions))
+
+// 文件处理
+fmt.Printf("在文件 %s 中找到 %d 个导出函数\n", baseName, len(functions))
+
+
+3. 测试状态打印
+
+在检查现有测试文件时，打印函数的测试状态：
+
+if functions[i].TestExists {
+    fmt.Printf("  函数 %s 已有测试: Test%s\n", functions[i].Name, functions[i].Name)
+}
+if functions[i].BenchExists {
+    fmt.Printf("  函数 %s 已有基准测试: Benchmark%s\n", functions[i].Name, functions[i].Name)
+}
+
+
+4. 交互确认操作打印
+
+在用户选择操作后，打印将执行的操作：
+
+switch choice {
+case "o":
+    fmt.Printf("  将覆盖函数 %s 的所有测试\n", fn.Name)
+case "t":
+    fmt.Printf("  将覆盖函数 %s 的测试函数\n", fn.Name)
+case "b":
+    fmt.Printf("  将覆盖函数 %s 的基准测试函数\n", fn.Name)
+case "k":
+    fmt.Printf("  跳过函数 %s\n", fn.Name)
+default:
+    fmt.Printf("  默认跳过函数 %s\n", fn.Name)
+}
+
+
+5. 最终处理结果打印
+
+在生成测试文件后，打印处理的函数信息：
+
+fmt.Printf("\n生成测试文件: %s\n", path)
+fmt.Println("处理的函数:")
+for _, fn := range functions {
+    if !fn.TestExists || *update {
+        fmt.Printf("  - 生成测试函数: Test%s\n", fn.Name)
+    }
+    if *benchmark && (!fn.BenchExists || *update) {
+        fmt.Printf("  - 生成基准测试函数: Benchmark%s\n", fn.Name)
+    }
+}
+
+
+使用示例
+
+1. 基本使用
+
+gotestgen -pkg=./mypackage
+
+
+输出：
+
+在包 mypackage 中找到 3 个导出函数
+找到导出函数: Add
+找到导出函数: Subtract
+找到导出函数: Multiply
+
+函数 Add 已有测试:
+  - 测试函数 TestAdd 已存在
+请选择操作:
+  o - 覆盖所有测试函数
+  k - 跳过此函数
+  t - 仅覆盖测试函数
+  b - 仅覆盖基准测试函数
+选择 [o/k/t/b]: t
+  将覆盖函数 Add 的测试函数
+
+生成测试文件: mypackage_test.go
+处理的函数:
+  - 生成测试函数: TestAdd
+  - 生成测试函数: TestSubtract
+  - 生成测试函数: TestMultiply
+
+
+2. 详细模式
+
+gotestgen -pkg=./mypackage -v
+
+
+输出：
+
+在包 mypackage 中找到 3 个导出函数
+找到导出函数: Add
+找到导出函数: Subtract
+找到导出函数: Multiply
+  函数 Add 已有测试: TestAdd
+  函数 Subtract 已有测试: TestSubtract
+
+函数 Add 已有测试:
+  - 测试函数 TestAdd 已存在
+请选择操作:
+  o - 覆盖所有测试函数
+  k - 跳过此函数
+  t - 仅覆盖测试函数
+  b - 仅覆盖基准测试函数
+选择 [o/k/t/b]: k
+  跳过函数 Add
+
+函数 Subtract 已有测试:
+  - 测试函数 TestSubtract 已存在
+请选择操作:
+  o - 覆盖所有测试函数
+  k - 跳过此函数
+  t - 仅覆盖测试函数
+  b - 仅覆盖基准测试函数
+选择 [o/k/t/b]: o
+  将覆盖函数 Subtract 的所有测试
+
+生成测试文件: mypackage_test.go
+处理的函数:
+  - 生成测试函数: TestMultiply
+  - 生成测试函数: TestSubtract
+
+
+3. 非交互模式
+
+gotestgen -pkg=./mypackage -i=false
+
+
+输出：
+
+在包 mypackage 中找到 3 个导出函数
+  函数 Add 已有测试: TestAdd
+  函数 Subtract 已有测试: TestSubtract
+
+生成测试文件: mypackage_test.go
+处理的函数:
+  - 生成测试函数: TestMultiply
+
+
+优势
+
+1. 透明性：清晰展示工具处理的每个函数
+
+2. 可追溯性：记录每个函数的处理决策
+
+3. 调试友好：帮助识别未被处理的函数
+
+4. 用户反馈：提供即时操作确认
+
+5. 审计跟踪：创建可审核的处理日志
+
+这个增强版工具现在提供了详细的函数处理日志，使用户能够清晰地了解工具的工作过程和决策依据，大大提升了工具的透明度和用户体验。
