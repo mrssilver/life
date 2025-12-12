@@ -1,0 +1,1298 @@
+
+//c go
+lisp treenode
+我将为您提供C语言和Go语言两种版本的树形打印实现。
+
+一、C语言版本
+
+1. 基础数据结构
+
+// tree_node.h
+#ifndef TREE_NODE_H
+#define TREE_NODE_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+
+// 树节点结构
+typedef struct TreeNode {
+    char* value;
+    struct TreeNode** children;
+    int child_count;
+    int capacity;
+} TreeNode;
+
+// 树节点创建和销毁
+TreeNode* tree_node_create(const char* value);
+void tree_node_destroy(TreeNode* node);
+void tree_node_add_child(TreeNode* parent, TreeNode* child);
+
+// 树形打印函数
+void tree_print(TreeNode* root);
+void tree_print_formatted(TreeNode* root, const char* format);
+char* tree_to_string(TreeNode* root);
+void tree_print_to_file(TreeNode* root, FILE* file);
+
+// 遍历函数
+void tree_traverse(TreeNode* root, void (*callback)(TreeNode*, int));
+
+#endif
+
+
+2. 实现文件
+
+// tree_node.c
+#include "tree_node.h"
+#include <stdarg.h>
+
+// 创建新节点
+TreeNode* tree_node_create(const char* value) {
+    TreeNode* node = (TreeNode*)malloc(sizeof(TreeNode));
+    if (!node) return NULL;
+    
+    node->value = strdup(value);
+    node->child_count = 0;
+    node->capacity = 4;
+    node->children = (TreeNode**)malloc(node->capacity * sizeof(TreeNode*));
+    
+    if (!node->children) {
+        free(node->value);
+        free(node);
+        return NULL;
+    }
+    
+    return node;
+}
+
+// 销毁节点及其子节点
+void tree_node_destroy(TreeNode* node) {
+    if (!node) return;
+    
+    for (int i = 0; i < node->child_count; i++) {
+        tree_node_destroy(node->children[i]);
+    }
+    
+    free(node->value);
+    free(node->children);
+    free(node);
+}
+
+// 添加子节点
+void tree_node_add_child(TreeNode* parent, TreeNode* child) {
+    if (!parent || !child) return;
+    
+    // 如果容量不足，扩容
+    if (parent->child_count >= parent->capacity) {
+        parent->capacity *= 2;
+        parent->children = (TreeNode**)realloc(parent->children, 
+                                               parent->capacity * sizeof(TreeNode*));
+    }
+    
+    parent->children[parent->child_count++] = child;
+}
+
+// 内部递归打印函数
+void tree_print_recursive(TreeNode* node, const char* prefix, bool is_last) {
+    if (!node) return;
+    
+    // 打印当前节点
+    printf("%s", prefix);
+    printf(is_last ? "└── " : "├── ");
+    printf("%s\n", node->value);
+    
+    // 构建新的前缀
+    char* new_prefix = (char*)malloc(strlen(prefix) + 5);
+    if (!new_prefix) return;
+    
+    strcpy(new_prefix, prefix);
+    strcat(new_prefix, is_last ? "    " : "│   ");
+    
+    // 递归打印子节点
+    for (int i = 0; i < node->child_count; i++) {
+        bool is_last_child = (i == node->child_count - 1);
+        tree_print_recursive(node->children[i], new_prefix, is_last_child);
+    }
+    
+    free(new_prefix);
+}
+
+// 打印树
+void tree_print(TreeNode* root) {
+    if (!root) {
+        printf("(empty tree)\n");
+        return;
+    }
+    tree_print_recursive(root, "", true);
+}
+
+// 将树转换为字符串
+typedef struct {
+    char* buffer;
+    size_t size;
+    size_t capacity;
+} StringBuffer;
+
+static void string_buffer_init(StringBuffer* buf) {
+    buf->capacity = 256;
+    buf->size = 0;
+    buf->buffer = (char*)malloc(buf->capacity);
+    if (buf->buffer) {
+        buf->buffer[0] = '\0';
+    }
+}
+
+static void string_buffer_append(StringBuffer* buf, const char* str) {
+    if (!buf || !str) return;
+    
+    size_t len = strlen(str);
+    if (buf->size + len + 1 >= buf->capacity) {
+        buf->capacity = (buf->size + len + 1) * 2;
+        buf->buffer = (char*)realloc(buf->buffer, buf->capacity);
+    }
+    
+    if (buf->buffer) {
+        strcat(buf->buffer + buf->size, str);
+        buf->size += len;
+    }
+}
+
+static void tree_to_string_recursive(TreeNode* node, const char* prefix, 
+                                   bool is_last, StringBuffer* buf) {
+    if (!node || !buf) return;
+    
+    char line[1024];
+    snprintf(line, sizeof(line), "%s%s%s\n", prefix,
+             is_last ? "└── " : "├── ", node->value);
+    string_buffer_append(buf, line);
+    
+    char* new_prefix = (char*)malloc(strlen(prefix) + 5);
+    if (!new_prefix) return;
+    
+    strcpy(new_prefix, prefix);
+    strcat(new_prefix, is_last ? "    " : "│   ");
+    
+    for (int i = 0; i < node->child_count; i++) {
+        bool is_last_child = (i == node->child_count - 1);
+        tree_to_string_recursive(node->children[i], new_prefix, is_last_child, buf);
+    }
+    
+    free(new_prefix);
+}
+
+char* tree_to_string(TreeNode* root) {
+    if (!root) return strdup("(empty tree)\n");
+    
+    StringBuffer buf;
+    string_buffer_init(&buf);
+    
+    if (!buf.buffer) return NULL;
+    
+    tree_to_string_recursive(root, "", true, &buf);
+    return buf.buffer;
+}
+
+// 多种格式打印
+void tree_print_compact(TreeNode* node, int depth) {
+    for (int i = 0; i < depth; i++) {
+        printf("  ");
+    }
+    printf("- %s\n", node->value);
+    
+    for (int i = 0; i < node->child_count; i++) {
+        tree_print_compact(node->children[i], depth + 1);
+    }
+}
+
+void tree_print_lisp(TreeNode* node) {
+    if (node->child_count == 0) {
+        printf("(%s)", node->value);
+        return;
+    }
+    
+    printf("(%s", node->value);
+    for (int i = 0; i < node->child_count; i++) {
+        printf(" ");
+        tree_print_lisp(node->children[i]);
+    }
+    printf(")");
+}
+
+void tree_print_formatted(TreeNode* root, const char* format) {
+    if (!root) return;
+    
+    if (strcmp(format, "tree") == 0) {
+        tree_print(root);
+    } else if (strcmp(format, "compact") == 0) {
+        tree_print_compact(root, 0);
+    } else if (strcmp(format, "lisp") == 0) {
+        tree_print_lisp(root);
+        printf("\n");
+    } else if (strcmp(format, "lines") == 0) {
+        // 行格式
+        void print_lines(TreeNode* n, const char* path) {
+            char new_path[1024];
+            if (path[0] == '\0') {
+                snprintf(new_path, sizeof(new_path), "%s", n->value);
+            } else {
+                snprintf(new_path, sizeof(new_path), "%s/%s", path, n->value);
+            }
+            printf("%s\n", new_path);
+            for (int i = 0; i < n->child_count; i++) {
+                print_lines(n->children[i], new_path);
+            }
+        }
+        print_lines(root, "");
+    }
+}
+
+// 遍历树
+void tree_traverse(TreeNode* root, void (*callback)(TreeNode*, int)) {
+    void traverse_recursive(TreeNode* node, int depth) {
+        if (!node) return;
+        callback(node, depth);
+        for (int i = 0; i < node->child_count; i++) {
+            traverse_recursive(node->children[i], depth + 1);
+        }
+    }
+    traverse_recursive(root, 0);
+}
+
+// 查找节点
+TreeNode* tree_find(TreeNode* root, const char* value) {
+    if (!root || !value) return NULL;
+    
+    if (strcmp(root->value, value) == 0) {
+        return root;
+    }
+    
+    for (int i = 0; i < root->child_count; i++) {
+        TreeNode* found = tree_find(root->children[i], value);
+        if (found) return found;
+    }
+    
+    return NULL;
+}
+
+
+3. 使用示例
+
+// main.c
+#include "tree_node.h"
+
+void print_node(TreeNode* node, int depth) {
+    for (int i = 0; i < depth; i++) printf("  ");
+    printf("Depth %d: %s\n", depth, node->value);
+}
+
+int main() {
+    printf("=== C语言树形打印示例 ===\n\n");
+    
+    // 创建树结构
+    TreeNode* root = tree_node_create("project");
+    TreeNode* src = tree_node_create("src");
+    TreeNode* include = tree_node_create("include");
+    TreeNode* tests = tree_node_create("tests");
+    TreeNode* docs = tree_node_create("docs");
+    
+    // 添加子节点
+    tree_node_add_child(root, src);
+    tree_node_add_child(root, include);
+    tree_node_add_child(root, tests);
+    tree_node_add_child(root, docs);
+    
+    // src的子节点
+    TreeNode* main_c = tree_node_create("main.c");
+    TreeNode* utils_c = tree_node_create("utils.c");
+    TreeNode* tree_c = tree_node_create("tree.c");
+    tree_node_add_child(src, main_c);
+    tree_node_add_child(src, utils_c);
+    tree_node_add_child(src, tree_c);
+    
+    // include的子节点
+    TreeNode* tree_h = tree_node_create("tree.h");
+    TreeNode* utils_h = tree_node_create("utils.h");
+    tree_node_add_child(include, tree_h);
+    tree_node_add_child(include, utils_h);
+    
+    // 打印树
+    printf("1. 树形格式:\n");
+    tree_print(root);
+    
+    printf("\n2. 紧凑格式:\n");
+    tree_print_formatted(root, "compact");
+    
+    printf("\n3. Lisp格式:\n");
+    tree_print_formatted(root, "lisp");
+    
+    printf("\n4. 行格式:\n");
+    tree_print_formatted(root, "lines");
+    
+    printf("\n5. 遍历节点:\n");
+    tree_traverse(root, print_node);
+    
+    // 转换为字符串
+    printf("\n6. 字符串形式:\n");
+    char* tree_str = tree_to_string(root);
+    printf("%s", tree_str);
+    free(tree_str);
+    
+    // 查找节点
+    printf("\n7. 查找节点:\n");
+    TreeNode* found = tree_find(root, "utils.c");
+    if (found) {
+        printf("找到节点: %s\n", found->value);
+    }
+    
+    // 清理内存
+    tree_node_destroy(root);
+    
+    return 0;
+}
+
+
+4. 编译和运行
+
+# Makefile
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c99
+TARGET = tree_printer
+SOURCES = tree_node.c main.c
+
+all: $(TARGET)
+
+$(TARGET): $(SOURCES)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCES)
+
+clean:
+	rm -f $(TARGET) *.o
+
+run: $(TARGET)
+	./$(TARGET)
+
+
+二、Go语言版本
+
+1. 完整实现
+
+// tree_printer.go
+package main
+
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+// TreeNode 树节点定义
+type TreeNode struct {
+	Value    string
+	Children []*TreeNode
+}
+
+// NewTreeNode 创建新节点
+func NewTreeNode(value string) *TreeNode {
+	return &TreeNode{
+		Value:    value,
+		Children: make([]*TreeNode, 0),
+	}
+}
+
+// AddChild 添加子节点
+func (n *TreeNode) AddChild(child *TreeNode) *TreeNode {
+	n.Children = append(n.Children, child)
+	return n
+}
+
+// AddChildren 批量添加子节点
+func (n *TreeNode) AddChildren(children ...*TreeNode) *TreeNode {
+	n.Children = append(n.Children, children...)
+	return n
+}
+
+// TreePrinter 树打印器接口
+type TreePrinter interface {
+	Print(root *TreeNode) string
+	PrintToStdout(root *TreeNode)
+}
+
+// TreeStyle 树样式配置
+type TreeStyle struct {
+	Vertical   string // 垂直线
+	Branch     string // 分支
+	Corner     string // 拐角
+	Horizontal string // 水平线
+	Space      string // 空格
+}
+
+// BasicTreePrinter 基础树打印器
+type BasicTreePrinter struct {
+	Style TreeStyle
+}
+
+// DefaultStyle 返回默认样式
+func DefaultStyle() TreeStyle {
+	return TreeStyle{
+		Vertical:   "│   ",
+		Branch:     "├── ",
+		Corner:     "└── ",
+		Horizontal: "─── ",
+		Space:      "    ",
+	}
+}
+
+// SimpleStyle 返回简单样式
+func SimpleStyle() TreeStyle {
+	return TreeStyle{
+		Vertical:   "|   ",
+		Branch:     "|-- ",
+		Corner:     "`-- ",
+		Horizontal: "--  ",
+		Space:      "    ",
+	}
+}
+
+// ASCIIArtTreePrinter 支持ASCII艺术的树打印器
+type ASCIIArtTreePrinter struct {
+	Style TreeStyle
+	Depth int
+}
+
+// Print 打印树
+func (p *ASCIIArtTreePrinter) Print(root *TreeNode) string {
+	if root == nil {
+		return ""
+	}
+	return p.printRecursive(root, "", true)
+}
+
+func (p *ASCIIArtTreePrinter) printRecursive(node *TreeNode, prefix string, isLast bool) string {
+	var builder strings.Builder
+	
+	// 构建当前行
+	builder.WriteString(prefix)
+	if prefix != "" {
+		if isLast {
+			builder.WriteString(p.Style.Corner)
+		} else {
+			builder.WriteString(p.Style.Branch)
+		}
+	}
+	builder.WriteString(node.Value)
+	builder.WriteString("\n")
+	
+	// 为子节点构建新前缀
+	childPrefix := prefix
+	if prefix != "" {
+		if isLast {
+			childPrefix += p.Style.Space
+		} else {
+			childPrefix += p.Style.Vertical
+		}
+	}
+	
+	// 递归打印子节点
+	for i, child := range node.Children {
+		isLastChild := i == len(node.Children)-1
+		builder.WriteString(p.printRecursive(child, childPrefix, isLastChild))
+	}
+	
+	return builder.String()
+}
+
+// PrintToStdout 打印到标准输出
+func (p *ASCIIArtTreePrinter) PrintToStdout(root *TreeNode) {
+	fmt.Print(p.Print(root))
+}
+
+// CompactTreePrinter 紧凑格式打印器
+type CompactTreePrinter struct{}
+
+func (p *CompactTreePrinter) Print(root *TreeNode) string {
+	var builder strings.Builder
+	p.printRecursive(root, 0, &builder)
+	return builder.String()
+}
+
+func (p *CompactTreePrinter) printRecursive(node *TreeNode, depth int, builder *strings.Builder) {
+	indent := strings.Repeat("  ", depth)
+	builder.WriteString(fmt.Sprintf("%s- %s\n", indent, node.Value))
+	
+	for _, child := range node.Children {
+		p.printRecursive(child, depth+1, builder)
+	}
+}
+
+func (p *CompactTreePrinter) PrintToStdout(root *TreeNode) {
+	fmt.Print(p.Print(root))
+}
+
+// LispStylePrinter Lisp风格打印器
+type LispStylePrinter struct{}
+
+func (p *LispStylePrinter) Print(root *TreeNode) string {
+	return p.printRecursive(root)
+}
+
+func (p *LispStylePrinter) printRecursive(node *TreeNode) string {
+	if len(node.Children) == 0 {
+		return node.Value
+	}
+	
+	var children []string
+	for _, child := range node.Children {
+		children = append(children, p.printRecursive(child))
+	}
+	
+	return fmt.Sprintf("(%s %s)", node.Value, strings.Join(children, " "))
+}
+
+func (p *LispStylePrinter) PrintToStdout(root *TreeNode) {
+	fmt.Println(p.Print(root))
+}
+
+// JSONTreePrinter JSON格式打印器
+type JSONTreePrinter struct{}
+
+func (p *JSONTreePrinter) Print(root *TreeNode) string {
+	return p.printRecursive(root, 0)
+}
+
+func (p *JSONTreePrinter) printRecursive(node *TreeNode, indent int) string {
+	spaces := strings.Repeat("  ", indent)
+	
+	if len(node.Children) == 0 {
+		return fmt.Sprintf(`"%s"`, node.Value)
+	}
+	
+	var childStrs []string
+	for _, child := range node.Children {
+		childStrs = append(childStrs, p.printRecursive(child, indent+1))
+	}
+	
+	return fmt.Sprintf(`{"%s": [%s%s%s
+%s]}`, 
+		node.Value, 
+		"\n", 
+		strings.Join(childStrs, ",\n"),
+		"\n"+spaces,
+		spaces)
+}
+
+func (p *JSONTreePrinter) PrintToStdout(root *TreeNode) {
+	fmt.Println(p.Print(root))
+}
+
+// TreeBuilder 树构建器
+type TreeBuilder struct {
+	root *TreeNode
+}
+
+func NewTreeBuilder(rootValue string) *TreeBuilder {
+	return &TreeBuilder{
+		root: NewTreeNode(rootValue),
+	}
+}
+
+func (b *TreeBuilder) AddPath(path ...string) *TreeBuilder {
+	current := b.root
+	for _, segment := range path {
+		found := false
+		for _, child := range current.Children {
+			if child.Value == segment {
+				current = child
+				found = true
+				break
+			}
+		}
+		if !found {
+			newNode := NewTreeNode(segment)
+			current.Children = append(current.Children, newNode)
+			current = newNode
+		}
+	}
+	return b
+}
+
+func (b *TreeBuilder) Build() *TreeNode {
+	return b.root
+}
+
+// TreeWalker 树遍历器
+type TreeWalker struct {
+	root *TreeNode
+}
+
+func NewTreeWalker(root *TreeNode) *TreeWalker {
+	return &TreeWalker{root: root}
+}
+
+// WalkDepthFirst 深度优先遍历
+func (w *TreeWalker) WalkDepthFirst(callback func(*TreeNode, int)) {
+	w.walkRecursive(w.root, 0, callback)
+}
+
+func (w *TreeWalker) walkRecursive(node *TreeNode, depth int, callback func(*TreeNode, int)) {
+	callback(node, depth)
+	for _, child := range node.Children {
+		w.walkRecursive(child, depth+1, callback)
+	}
+}
+
+// WalkBreadthFirst 广度优先遍历
+func (w *TreeWalker) WalkBreadthFirst(callback func(*TreeNode, int)) {
+	queue := []struct {
+		node  *TreeNode
+		depth int
+	}{{w.root, 0}}
+	
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		
+		callback(current.node, current.depth)
+		
+		for _, child := range current.node.Children {
+			queue = append(queue, struct {
+				node  *TreeNode
+				depth int
+			}{child, current.depth + 1})
+		}
+	}
+}
+
+// TreeStats 树统计信息
+type TreeStats struct {
+	TotalNodes  int
+	MaxDepth    int
+	LeafCount   int
+	BranchCount int
+}
+
+// GetStats 获取树统计信息
+func (w *TreeWalker) GetStats() TreeStats {
+	stats := TreeStats{}
+	
+	w.WalkDepthFirst(func(node *TreeNode, depth int) {
+		stats.TotalNodes++
+		stats.MaxDepth = max(stats.MaxDepth, depth)
+		
+		if len(node.Children) == 0 {
+			stats.LeafCount++
+		} else {
+			stats.BranchCount++
+		}
+	})
+	
+	return stats
+}
+
+// 辅助函数
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// TreeSearch 树搜索
+func SearchTree(root *TreeNode, predicate func(*TreeNode) bool) []*TreeNode {
+	var results []*TreeNode
+	
+	walker := NewTreeWalker(root)
+	walker.WalkDepthFirst(func(node *TreeNode, depth int) {
+		if predicate(node) {
+			results = append(results, node)
+		}
+	})
+	
+	return results
+}
+
+// FindByValue 按值查找
+func FindByValue(root *TreeNode, value string) *TreeNode {
+	results := SearchTree(root, func(node *TreeNode) bool {
+		return node.Value == value
+	})
+	
+	if len(results) > 0 {
+		return results[0]
+	}
+	return nil
+}
+
+
+2. 主程序示例
+
+// main.go
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func createSampleTree() *TreeNode {
+	// 创建示例树结构
+	root := NewTreeNode("my-project").
+		AddChild(
+			NewTreeNode("src").
+				AddChildren(
+					NewTreeNode("main.go"),
+					NewTreeNode("utils.go"),
+					NewTreeNode("handlers").
+						AddChildren(
+							NewTreeNode("user.go"),
+							NewTreeNode("auth.go"),
+						),
+				),
+		).
+		AddChild(
+			NewTreeNode("pkg").
+				AddChildren(
+					NewTreeNode("math"),
+					NewTreeNode("strings"),
+				),
+		).
+		AddChild(
+			NewTreeNode("tests").
+				AddChildren(
+					NewTreeNode("unit"),
+					NewTreeNode("integration"),
+				),
+		).
+		AddChild(
+			NewTreeNode("docs").
+				AddChildren(
+					NewTreeNode("README.md"),
+					NewTreeNode("API.md"),
+				),
+		)
+	
+	return root
+}
+
+func demoAllFormats(tree *TreeNode) {
+	fmt.Println("=== 不同格式的树形打印 ===\n")
+	
+	fmt.Println("1. 树形格式 (默认样式):")
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	printer.PrintToStdout(tree)
+	
+	fmt.Println("\n2. 树形格式 (简单样式):")
+	printer.Style = SimpleStyle()
+	printer.PrintToStdout(tree)
+	
+	fmt.Println("\n3. 紧凑格式:")
+	compactPrinter := &CompactTreePrinter{}
+	compactPrinter.PrintToStdout(tree)
+	
+	fmt.Println("\n4. Lisp风格:")
+	lispPrinter := &LispStylePrinter{}
+	lispPrinter.PrintToStdout(tree)
+	
+	fmt.Println("\n5. JSON格式:")
+	jsonPrinter := &JSONTreePrinter{}
+	jsonPrinter.PrintToStdout(tree)
+}
+
+func demoTreeOperations(tree *TreeNode) {
+	fmt.Println("\n=== 树操作演示 ===\n")
+	
+	// 统计信息
+	walker := NewTreeWalker(tree)
+	stats := walker.GetStats()
+	fmt.Printf("树统计信息:\n")
+	fmt.Printf("  总节点数: %d\n", stats.TotalNodes)
+	fmt.Printf("  最大深度: %d\n", stats.MaxDepth)
+	fmt.Printf("  叶子节点: %d\n", stats.LeafCount)
+	fmt.Printf("  分支节点: %d\n", stats.BranchCount)
+	
+	// 遍历
+	fmt.Println("\n深度优先遍历:")
+	walker.WalkDepthFirst(func(node *TreeNode, depth int) {
+		indent := strings.Repeat("  ", depth)
+		fmt.Printf("%s%s (深度: %d)\n", indent, node.Value, depth)
+	})
+	
+	// 搜索
+	fmt.Println("\n搜索包含 'go' 的节点:")
+	goFiles := SearchTree(tree, func(node *TreeNode) bool {
+		return strings.Contains(node.Value, ".go")
+	})
+	for _, file := range goFiles {
+		fmt.Printf("  - %s\n", file.Value)
+	}
+	
+	// 查找特定节点
+	fmt.Println("\n查找节点 'handlers':")
+	found := FindByValue(tree, "handlers")
+	if found != nil {
+		fmt.Printf("  找到节点: %s\n", found.Value)
+		fmt.Println("  其子节点:")
+		for _, child := range found.Children {
+			fmt.Printf("    - %s\n", child.Value)
+		}
+	}
+}
+
+func demoTreeBuilder() {
+	fmt.Println("\n=== 树构建器演示 ===\n")
+	
+	builder := NewTreeBuilder("root").
+		AddPath("usr", "local", "bin").
+		AddPath("usr", "local", "lib").
+		AddPath("usr", "share", "man").
+		AddPath("var", "log").
+		AddPath("var", "cache")
+	
+	tree := builder.Build()
+	
+	fmt.Println("从路径构建的树:")
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	printer.PrintToStdout(tree)
+}
+
+func demoCustomTree() {
+	fmt.Println("\n=== 自定义树演示 ===\n")
+	
+	// 创建一个组织架构树
+	ceo := NewTreeNode("CEO: Alice Johnson")
+	
+	cto := NewTreeNode("CTO: Bob Smith").
+		AddChild(
+			NewTreeNode("Engineering").
+				AddChildren(
+					NewTreeNode("Backend Team"),
+					NewTreeNode("Frontend Team"),
+					NewTreeNode("DevOps"),
+				),
+		).
+		AddChild(
+			NewTreeNode("Product").
+				AddChildren(
+					NewTreeNode("Design"),
+					NewTreeNode("Research"),
+				),
+		)
+	
+	cfo := NewTreeNode("CFO: Carol White").
+		AddChild(
+			NewTreeNode("Finance").
+				AddChildren(
+					NewTreeNode("Accounting"),
+					NewTreeNode("Budget"),
+				),
+		).
+		AddChild(
+			NewTreeNode("HR").
+				AddChildren(
+					NewTreeNode("Recruitment"),
+					NewTreeNode("Training"),
+				),
+		)
+	
+	ceo.AddChildren(cto, cfo)
+	
+	fmt.Println("组织架构树:")
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	printer.PrintToStdout(ceo)
+}
+
+func saveTreeToFile(tree *TreeNode, filename string) error {
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	treeStr := printer.Print(tree)
+	
+	return os.WriteFile(filename, []byte(treeStr), 0644)
+}
+
+func main() {
+	fmt.Println("=== Go语言树形打印系统 ===\n")
+	
+	// 创建示例树
+	tree := createSampleTree()
+	
+	// 演示所有格式
+	demoAllFormats(tree)
+	
+	// 演示树操作
+	demoTreeOperations(tree)
+	
+	// 演示树构建器
+	demoTreeBuilder()
+	
+	// 演示自定义树
+	demoCustomTree()
+	
+	// 保存到文件
+	fmt.Println("\n=== 保存到文件 ===")
+	err := saveTreeToFile(tree, "tree_output.txt")
+	if err != nil {
+		fmt.Printf("保存文件失败: %v\n", err)
+	} else {
+		fmt.Println("树结构已保存到 tree_output.txt")
+	}
+	
+	// 交互式演示
+	fmt.Println("\n=== 交互式演示 ===")
+	fmt.Println("请输入树节点，用空格分隔，空行结束:")
+	
+	interactiveTree := NewTreeNode("root")
+	var input string
+	
+	for {
+		fmt.Print("> ")
+		fmt.Scanln(&input)
+		if input == "" {
+			break
+		}
+		
+		paths := strings.Fields(input)
+		for _, path := range paths {
+			interactiveTree.AddChild(NewTreeNode(path))
+		}
+	}
+	
+	fmt.Println("\n你创建的树:")
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	printer.PrintToStdout(interactiveTree)
+}
+
+
+3. 高级功能扩展
+
+// advanced_tree.go
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ColorTreePrinter 彩色树打印器
+type ColorTreePrinter struct {
+	Style    TreeStyle
+	Colors   []string
+	MaxDepth int
+}
+
+func NewColorTreePrinter() *ColorTreePrinter {
+	return &ColorTreePrinter{
+		Style: DefaultStyle(),
+		Colors: []string{
+			"\033[31m", // 红色
+			"\033[32m", // 绿色
+			"\033[33m", // 黄色
+			"\033[34m", // 蓝色
+			"\033[35m", // 紫色
+			"\033[36m", // 青色
+		},
+		MaxDepth: 0,
+	}
+}
+
+func (p *ColorTreePrinter) Print(root *TreeNode) string {
+	var builder strings.Builder
+	p.printRecursive(root, "", true, 0, &builder)
+	return builder.String()
+}
+
+func (p *ColorTreePrinter) printRecursive(node *TreeNode, prefix string, isLast bool, depth int, builder *strings.Builder) {
+	// 选择颜色
+	color := ""
+	if depth < len(p.Colors) {
+		color = p.Colors[depth%len(p.Colors)]
+	}
+	reset := "\033[0m"
+	
+	// 构建当前行
+	builder.WriteString(prefix)
+	if prefix != "" {
+		if isLast {
+			builder.WriteString(p.Style.Corner)
+		} else {
+			builder.WriteString(p.Style.Branch)
+		}
+	}
+	
+	builder.WriteString(color)
+	builder.WriteString(node.Value)
+	builder.WriteString(reset)
+	builder.WriteString("\n")
+	
+	// 检查深度限制
+	if p.MaxDepth > 0 && depth >= p.MaxDepth {
+		if len(node.Children) > 0 {
+			builder.WriteString(prefix)
+			builder.WriteString(p.Style.Space)
+			builder.WriteString(fmt.Sprintf("... %d more items\n", len(node.Children)))
+		}
+		return
+	}
+	
+	// 为子节点构建新前缀
+	childPrefix := prefix
+	if prefix != "" {
+		if isLast {
+			childPrefix += p.Style.Space
+		} else {
+			childPrefix += p.Style.Vertical
+		}
+	}
+	
+	// 递归打印子节点
+	for i, child := range node.Children {
+		isLastChild := i == len(node.Children)-1
+		p.printRecursive(child, childPrefix, isLastChild, depth+1, builder)
+	}
+}
+
+// TreeFilter 树过滤器
+type TreeFilter struct {
+	Root *TreeNode
+}
+
+func NewTreeFilter(root *TreeNode) *TreeFilter {
+	return &TreeFilter{Root: root}
+}
+
+func (f *TreeFilter) Filter(predicate func(*TreeNode) bool) *TreeNode {
+	return f.filterRecursive(f.Root, predicate)
+}
+
+func (f *TreeFilter) filterRecursive(node *TreeNode, predicate func(*TreeNode) bool) *TreeNode {
+	if node == nil {
+		return nil
+	}
+	
+	// 如果当前节点不满足条件，但可能有子节点满足
+	newNode := NewTreeNode(node.Value)
+	
+	for _, child := range node.Children {
+		filteredChild := f.filterRecursive(child, predicate)
+		if filteredChild != nil {
+			newNode.Children = append(newNode.Children, filteredChild)
+		}
+	}
+	
+	// 如果节点满足条件或有子节点，则保留
+	if predicate(node) || len(newNode.Children) > 0 {
+		return newNode
+	}
+	
+	return nil
+}
+
+// TreeTransformer 树转换器
+type TreeTransformer struct{}
+
+func (t *TreeTransformer) Transform(root *TreeNode, transformFunc func(*TreeNode) *TreeNode) *TreeNode {
+	return t.transformRecursive(root, transformFunc)
+}
+
+func (t *TreeTransformer) transformRecursive(node *TreeNode, transformFunc func(*TreeNode) *TreeNode) *TreeNode {
+	if node == nil {
+		return nil
+	}
+	
+	// 应用转换函数
+	transformed := transformFunc(node)
+	if transformed == nil {
+		return nil
+	}
+	
+	// 递归转换子节点
+	for _, child := range node.Children {
+		transformedChild := t.transformRecursive(child, transformFunc)
+		if transformedChild != nil {
+			transformed.Children = append(transformed.Children, transformedChild)
+		}
+	}
+	
+	return transformed
+}
+
+func mainAdvanced() {
+	fmt.Println("=== 高级树操作演示 ===\n")
+	
+	// 创建示例树
+	tree := createSampleTree()
+	
+	// 彩色打印
+	fmt.Println("1. 彩色树形打印:")
+	colorPrinter := NewColorTreePrinter()
+	colorPrinter.MaxDepth = 3
+	fmt.Println(colorPrinter.Print(tree))
+	
+	// 过滤演示
+	fmt.Println("\n2. 树过滤 (只显示 .go 文件):")
+	filter := NewTreeFilter(tree)
+	filtered := filter.Filter(func(node *TreeNode) bool {
+		return strings.HasSuffix(node.Value, ".go")
+	})
+	
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	printer.PrintToStdout(filtered)
+	
+	// 转换演示
+	fmt.Println("\n3. 树转换 (添加文件类型图标):")
+	transformer := &TreeTransformer{}
+	transformed := transformer.Transform(tree, func(node *TreeNode) *TreeNode {
+		newNode := NewTreeNode(node.Value)
+		
+		// 根据扩展名添加图标
+		if strings.HasSuffix(node.Value, ".go") {
+			newNode.Value = "📦 " + node.Value
+		} else if strings.HasSuffix(node.Value, ".md") {
+			newNode.Value = "📄 " + node.Value
+		} else if len(node.Children) > 0 {
+			newNode.Value = "📁 " + node.Value
+		} else {
+			newNode.Value = "📄 " + node.Value
+		}
+		
+		return newNode
+	})
+	
+	printer.PrintToStdout(transformed)
+}
+
+
+4. 测试文件
+
+// tree_printer_test.go
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestTreeNodeCreation(t *testing.T) {
+	node := NewTreeNode("test")
+	if node.Value != "test" {
+		t.Errorf("期望值: test, 实际值: %s", node.Value)
+	}
+	if len(node.Children) != 0 {
+		t.Errorf("期望子节点数: 0, 实际: %d", len(node.Children))
+	}
+}
+
+func TestAddChild(t *testing.T) {
+	parent := NewTreeNode("parent")
+	child := NewTreeNode("child")
+	
+	parent.AddChild(child)
+	
+	if len(parent.Children) != 1 {
+		t.Errorf("期望子节点数: 1, 实际: %d", len(parent.Children))
+	}
+	if parent.Children[0] != child {
+		t.Error("添加的子节点不正确")
+	}
+}
+
+func TestTreePrinting(t *testing.T) {
+	root := NewTreeNode("root")
+	a := NewTreeNode("A")
+	b := NewTreeNode("B")
+	
+	root.AddChild(a)
+	root.AddChild(b)
+	
+	printer := &ASCIIArtTreePrinter{Style: DefaultStyle()}
+	output := printer.Print(root)
+	
+	if !strings.Contains(output, "root") {
+		t.Error("输出中应包含 'root'")
+	}
+	if !strings.Contains(output, "A") {
+		t.Error("输出中应包含 'A'")
+	}
+	if !strings.Contains(output, "B") {
+		t.Error("输出中应包含 'B'")
+	}
+}
+
+func TestTreeStats(t *testing.T) {
+	root := NewTreeNode("root")
+	a := NewTreeNode("A")
+	b := NewTreeNode("B")
+	c := NewTreeNode("C")
+	
+	root.AddChild(a)
+	root.AddChild(b)
+	a.AddChild(c)
+	
+	walker := NewTreeWalker(root)
+	stats := walker.GetStats()
+	
+	if stats.TotalNodes != 4 {
+		t.Errorf("期望总节点数: 4, 实际: %d", stats.TotalNodes)
+	}
+	if stats.LeafCount != 2 {
+		t.Errorf("期望叶子节点数: 2, 实际: %d", stats.LeafCount)
+	}
+	if stats.BranchCount != 2 {
+		t.Errorf("期望分支节点数: 2, 实际: %d", stats.BranchCount)
+	}
+}
+
+func TestSearchTree(t *testing.T) {
+	root := NewTreeNode("root")
+	a := NewTreeNode("apple")
+	b := NewTreeNode("banana")
+	c := NewTreeNode("cherry")
+	
+	root.AddChild(a)
+	root.AddChild(b)
+	a.AddChild(c)
+	
+	results := SearchTree(root, func(node *TreeNode) bool {
+		return strings.Contains(node.Value, "a")
+	})
+	
+	if len(results) != 3 { // root, apple, banana
+		t.Errorf("期望找到3个节点, 实际: %d", len(results))
+	}
+}
+
+
+运行说明
+
+C版本：
+
+# 编译
+gcc -o tree_printer tree_node.c main.c
+
+# 运行
+./tree_printer
+
+
+Go版本：
+
+# 运行主程序
+go run tree_printer.go main.go
+
+# 运行高级演示
+go run tree_printer.go advanced_tree.go
+
+# 运行测试
+go test -v
+
+
+这两个版本都实现了完整的树形打印功能，包括：
+
+1. 树形结构显示
+
+2. 多种输出格式（树形、Lisp、JSON、紧凑格式等）
+
+3. 树遍历和搜索
+
+4. 统计信息
+
+5. 高级功能（过滤、转换、彩色输出等）
+
+Go版本更完整，包含了更多现代特性，而C版本更注重基础实现和内存管理。
